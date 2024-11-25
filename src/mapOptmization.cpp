@@ -1,6 +1,8 @@
 #include "utility.h"
 #include "lio_sam/cloud_info.h"
 #include "lio_sam/save_map.h"
+#include "DataType.h"
+#include "Object.h"
 
 #include <gtsam/geometry/Rot3.h>
 #include <gtsam/geometry/Pose3.h>
@@ -16,6 +18,8 @@
 #include <gtsam/inference/Symbol.h>
 
 #include <gtsam/nonlinear/ISAM2.h>
+
+#include <cv_bridge/cv_bridge.h>
 
 using namespace gtsam;
 
@@ -49,7 +53,69 @@ typedef PointXYZIRPYT  PointTypePose;
 
 class mapOptimization : public ParamServer
 {
+private:
+    double depth_factor_ = 1.0;
+    ros::Publisher pub_cloud_;
+    std::mutex object_lock_;
+    queue<LIO_SAM_SEMANTIC::DetectionGroup> detection_buf_;
+    void yoloDepthCallback(const sensor_msgs::ImageConstPtr& depth_image, const yolo_protocol::YoloResultConstPtr& yolo_result, const Eigen::Matrix4d& sensor_pose, const Eigen::Matrix3d& K){
+        sensor_msgs::ImageConstPtr color_img = boost::make_shared<sensor_msgs::Image const>(yolo_result->original);
+        cv_bridge::CvImageConstPtr cv_rgb_bridge = cv_bridge::toCvShare(color_img, "bgr8");
+        cv_bridge::CvImageConstPtr cv_depth_bridge = cv_bridge::toCvShare(depth_image, depth_image->encoding);
+        cv::Mat image = cv_rgb_bridge->image.clone();
+        cv::Mat depth_mat = cv_depth_bridge->image.clone();
+        cv::Mat depth_scaled;
+        if((fabs(depth_factor_-1.0)>1e-5) || depth_mat.type()!=CV_64F){
+            depth_mat.convertTo(depth_scaled, CV_64F, 1.0/depth_factor_);
+        }
+        LIO_SAM_SEMANTIC::DetectionGroup detection_groups;
+        for(int i = 0; i < yolo_result->detections.detections.size(); ++i){
+            auto detect = yolo_result->detections.detections[i];
+            cv::Rect roi(cv::Point(detect.bbox.center.x- detect.bbox.size_x/2, detect.bbox.center.y - detect.bbox.size_y/2), cv::Size(detect.bbox.size_x, detect.bbox.size_y));
+            cv::Mat mask;
+            if(!yolo_result->masks.empty()){
+                sensor_msgs::ImageConstPtr mask_msg = boost::make_shared<sensor_msgs::Image const>(yolo_result->masks[i]);
+                cv_bridge::CvImageConstPtr mask_cv = cv_bridge::toCvShare(mask_msg, "mono8");
+                mask = mask_cv->image.clone();
+            }
+            else{
+                mask = cv::Mat::zeros(image.size(), CV_8U);
+                mask(roi) = 255;
+            }
 
+            
+            if(detect.header.frame_id == "desk"){ //temporarily disabled
+                continue;
+            }
+            LIO_SAM_SEMANTIC::Detection det_p(roi, cv::Mat(), detect.header.frame_id);
+            det_p.calcInitQuadric(depth_scaled, mask, K);
+            detection_groups.detections.push_back(det_p);
+        }
+        object_lock_.lock();
+        detection_buf_.push(detection_groups);
+        object_lock_.unlock();
+        // //===========Debug scale=====
+        // pcl::PointCloud<pcl::PointXYZ> cloud;
+        // for(int r = 0; r < depth_mat.rows; ++r){
+        //     for(int c = 0; c < depth_mat.cols; ++c){
+        //         double depth = depth_scaled.at<double>(r, c);
+        //         if(isnan(depth) || depth < 1.0e-4){
+        //             continue;
+        //         }
+        //         pcl::PointXYZ pt;
+        //         pt.x = (c - K(0, 2)) * depth / K(0, 0);
+        //         pt.y = (r - K(1, 2)) * depth / K(1, 1);
+        //         pt.z = depth;
+        //         cloud.push_back(pt);
+        //     }
+        // }
+        // sensor_msgs::PointCloud2 depth_cloud;
+        // pcl::toROSMsg(cloud, depth_cloud);
+        // depth_cloud.header.stamp = ros::Time::now();
+        // depth_cloud.header.frame_id = "camera_link";
+        // pub_cloud_.publish(depth_cloud);
+        // //===========================
+    }
 public:
 
     // gtsam
@@ -79,6 +145,10 @@ public:
     ros::Subscriber subGPS;
     ros::Subscriber subLoop;
 
+    std::shared_ptr<message_filters::Subscriber<sensor_msgs::Image>> front_depth_;
+    std::shared_ptr<message_filters::Subscriber<yolo_protocol::YoloResult>> front_yolo_;
+    std::shared_ptr< message_filters::Synchronizer<yolo_sync_pol>> front_sync_;
+
     ros::ServiceServer srvSaveMap;
 
     std::deque<nav_msgs::Odometry> gpsQueue;
@@ -91,6 +161,8 @@ public:
     pcl::PointCloud<PointTypePose>::Ptr cloudKeyPoses6D;
     pcl::PointCloud<PointType>::Ptr copy_cloudKeyPoses3D;
     pcl::PointCloud<PointTypePose>::Ptr copy_cloudKeyPoses6D;
+
+    vector<LIO_SAM_SEMANTIC::Object> objects_;
 
     pcl::PointCloud<PointType>::Ptr laserCloudCornerLast; // corner feature set from odoOptimization
     pcl::PointCloud<PointType>::Ptr laserCloudSurfLast; // surf feature set from odoOptimization
@@ -171,6 +243,11 @@ public:
         subGPS   = nh.subscribe<nav_msgs::Odometry> (gpsTopic, 200, &mapOptimization::gpsHandler, this, ros::TransportHints().tcpNoDelay());
         subLoop  = nh.subscribe<std_msgs::Float64MultiArray>("lio_loop/loop_closure_detection", 1, &mapOptimization::loopInfoHandler, this, ros::TransportHints().tcpNoDelay());
 
+        front_depth_.reset(new message_filters::Subscriber<sensor_msgs::Image> (nh, depth_topic_, 1));
+        front_yolo_.reset(new message_filters::Subscriber<yolo_protocol::YoloResult> (nh, rgb_topic_+"/yolo", 1));
+        front_sync_.reset(new message_filters::Synchronizer<yolo_sync_pol> (yolo_sync_pol(10), *front_depth_, *front_yolo_));
+        front_sync_->registerCallback(boost::bind(&mapOptimization::yoloDepthCallback, this, _1, _2, Eigen::Matrix4d::Identity(), K_));
+
         srvSaveMap  = nh.advertiseService("lio_sam/save_map", &mapOptimization::saveMapService, this);
 
         pubHistoryKeyFrames   = nh.advertise<sensor_msgs::PointCloud2>("lio_sam/mapping/icp_loop_closure_history_cloud", 1);
@@ -188,6 +265,7 @@ public:
         downSizeFilterICP.setLeafSize(mappingSurfLeafSize, mappingSurfLeafSize, mappingSurfLeafSize);
         downSizeFilterSurroundingKeyPoses.setLeafSize(surroundingKeyframeDensity, surroundingKeyframeDensity, surroundingKeyframeDensity); // for surrounding key poses of scan-to-map optimization
 
+        pub_cloud_ = nh.advertise<sensor_msgs::PointCloud2>("depth_cloud", 1);
         allocateMemory();
     }
 
@@ -1492,6 +1570,35 @@ public:
         loopPoseQueue.clear();
         loopNoiseQueue.clear();
         aLoopIsClosed = true;
+    }
+    void addSemanticFactor(){
+        
+        int boundary_thresh = 10;
+        int img_width = 640;
+        int img_height = 480; 
+        cv::Rect screen(0, 0, img_width, img_height);
+        unique_lock<mutex> lock(object_lock_);
+        double stamp = ros::Time::now().toSec();
+        LIO_SAM_SEMANTIC::DetectionGroup dg;
+        while(!detection_buf_.empty()){
+            double obj_stamp = detection_buf_.front().stamp;
+            if(obj_stamp > stamp){
+                break;
+            }
+            if(stamp - obj_stamp < 0.1){
+                if(dg.stamp < 0.0){
+                    dg = detection_buf_.front();
+                }
+                else if(dg.stamp < obj_stamp){
+                    dg = detection_buf_.front();
+                }
+            }
+            detection_buf_.pop();
+        }
+        for(const auto& det : dg.detections){
+
+        }
+
     }
 
     void saveKeyFramesAndFactor()

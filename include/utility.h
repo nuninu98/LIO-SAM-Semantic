@@ -15,7 +15,7 @@
 #include <visualization_msgs/Marker.h>
 #include <visualization_msgs/MarkerArray.h>
 
-#include <opencv/cv.h>
+//#include <opencv/cv.h>
 
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
@@ -30,6 +30,8 @@
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/filters/crop_box.h> 
 #include <pcl_conversions/pcl_conversions.h>
+
+#include <opencv2/opencv.hpp>
 
 #include <tf/LinearMath/Quaternion.h>
 #include <tf/transform_listener.h>
@@ -151,6 +153,10 @@ public:
     float globalMapVisualizationPoseDensity;
     float globalMapVisualizationLeafSize;
 
+    //Camera
+    string rgb_topic_; 
+    string depth_topic_;
+    Eigen::Matrix3d K_;
     ParamServer()
     {
         nh.param<std::string>("/robot_id", robot_id, "roboat");
@@ -246,6 +252,19 @@ public:
         nh.param<float>("lio_sam/globalMapVisualizationPoseDensity", globalMapVisualizationPoseDensity, 10.0);
         nh.param<float>("lio_sam/globalMapVisualizationLeafSize", globalMapVisualizationLeafSize, 1.0);
 
+        nh.param<std::string>("lio_sam/rgb_topic", rgb_topic_, "");
+        nh.param<std::string>("lio_sam/depth_topic", depth_topic_, "");
+        std::vector<double> K_vec;
+        nh.param<std::vector<double>>("lio_sam/K",K_vec ,std::vector<double>());
+        K_(0, 0) = K_vec[0];
+        K_(0, 1) = K_vec[1];
+        K_(0, 2) = K_vec[2];
+        K_(1, 0) = K_vec[3];
+        K_(1, 1) = K_vec[4];
+        K_(1, 2) = K_vec[5];
+        K_(2, 0) = K_vec[6];
+        K_(2, 1) = K_vec[7];
+        K_(2, 2) = K_vec[8];
         usleep(100);
     }
 

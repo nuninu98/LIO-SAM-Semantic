@@ -45,4 +45,11 @@
   <build_depend>GTSAM</build_depend>
   <run_depend>GTSAM</run_depend>
 
+  <build_depend>message_filters</build_depend>
+  <run_depend>message_filters</run_depend>
+
+  <build_depend>yolo_protocol</build_depend>
+  <run_depend>yolo_protocol</run_depend>
+
+
 </package>

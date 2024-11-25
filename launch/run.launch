@@ -1,5 +1,5 @@
 <launch>
-
+    <arg name="use_sim_time" default="true" />
     <arg name="project" default="lio_sam"/>
     
     <!-- Parameters -->
