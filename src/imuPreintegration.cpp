@@ -38,6 +38,8 @@ public:
     tf::TransformListener tfListener;
     tf::StampedTransform lidar2Baselink;
 
+    ros::Publisher pubMap2Baselink;
+
     double lidarOdomTime = -1;
     deque<nav_msgs::Odometry> imuOdomQueue;
 
@@ -61,6 +63,8 @@ public:
 
         pubImuOdometry   = nh.advertise<nav_msgs::Odometry>(odomTopic, 2000);
         pubImuPath       = nh.advertise<nav_msgs::Path>    ("lio_sam/imu/path", 1);
+
+        pubMap2Baselink = nh.advertise<nav_msgs::Odometry>("lio_sam/map_to_base", 1);
     }
 
     Eigen::Affine3f odom2affine(nav_msgs::Odometry odom)
@@ -150,6 +154,30 @@ public:
                 pubImuPath.publish(imuPath);
             }
         }
+
+        Eigen::Matrix4d Tmo = Eigen::Matrix4d::Identity();
+        Eigen::Matrix4d Tob = Eigen::Matrix4d::Identity();
+        Tob(0, 3) = odom_2_baselink.getOrigin().x();
+        Tob(1, 3) = odom_2_baselink.getOrigin().y();
+        Tob(2, 3) = odom_2_baselink.getOrigin().z();
+
+        Eigen::Quaterniond qob(odom_2_baselink.getRotation().w(), odom_2_baselink.getRotation().x(), odom_2_baselink.getRotation().y(), odom_2_baselink.getRotation().z());
+        Tob.block<3, 3>(0, 0) = Eigen::Matrix3d(qob);
+        Eigen::Matrix4d Tmb = Tmo * Tob;
+        nav_msgs::Odometry map_to_base;
+        map_to_base.header.frame_id = "map";
+        map_to_base.header.stamp = ros::Time::now();
+        map_to_base.pose.pose.position.x = Tmb(0, 3);
+        map_to_base.pose.pose.position.y = Tmb(1, 3);
+        map_to_base.pose.pose.position.z = Tmb(2, 3);
+
+        Eigen::Quaterniond qmb(Tmb.block<3, 3>(0, 0));
+        map_to_base.pose.pose.orientation.w = qmb.w();
+        map_to_base.pose.pose.orientation.x = qmb.x();
+        map_to_base.pose.pose.orientation.y = qmb.y();
+        map_to_base.pose.pose.orientation.z = qmb.z();
+        
+        pubMap2Baselink.publish(map_to_base);
     }
 };
 

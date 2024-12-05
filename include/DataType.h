@@ -26,11 +26,20 @@ namespace LIO_SAM_SEMANTIC{
         public: 
             EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
+        private:
+            cv::Rect roi_;
+            cv::Mat mask_;
+            string name_;
+            gtsam_quadrics::ConstrainedDualQuadric Q_;
+
+        public:             
             Detection();
 
             Detection(const cv::Rect& roi, const cv::Mat& mask, const string& name);
 
             Detection(const Detection& d);
+
+            Detection& operator=(const Detection& d);
 
             ~Detection();   
 
@@ -43,16 +52,15 @@ namespace LIO_SAM_SEMANTIC{
 
             void calcInitQuadric(const cv::Mat& depth_scaled, const cv::Mat& mask, const Eigen::Matrix3d& K);
 
-        private:
-            cv::Rect roi_;
-            cv::Mat mask_;
-            string name_;
-            gtsam_quadrics::ConstrainedDualQuadric Q_;
+            gtsam_quadrics::ConstrainedDualQuadric Q() const;
+        
+
     };
 
     struct DetectionGroup{
         double stamp;
         vector<Detection> detections;
+        cv::Mat view;
 
         DetectionGroup(): stamp(-1.0){
 

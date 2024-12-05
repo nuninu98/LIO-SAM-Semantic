@@ -8,6 +8,10 @@ namespace LIO_SAM_SEMANTIC{
     Object::Object(const Object& obj): Q_(obj.Q_), id_(obj.id_), name_(obj.name_){
 
     }
+    
+    Object::~Object(){
+        
+    }
 
     Object::Object(const string& name, size_t id, const gtsam_quadrics::ConstrainedDualQuadric& Q): Q_(Q), id_(id), name_(name){
 

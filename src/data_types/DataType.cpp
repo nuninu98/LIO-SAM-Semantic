@@ -13,6 +13,14 @@ namespace LIO_SAM_SEMANTIC{
 
     }
 
+    Detection& Detection::operator=(const Detection& d){
+        roi_ = d.roi_;
+        mask_ = d.mask_.clone();
+        name_ = d.name_;
+        Q_ = d.Q_;
+        return *this;
+    }
+
     Detection::~Detection(){
 
     }
@@ -56,9 +64,11 @@ namespace LIO_SAM_SEMANTIC{
                 sort_pt.push_back(pt);
             }
         }
+        // std::cout<<"2222"<<std::endl;
         sort(sort_pt.begin(), sort_pt.end(), [](const pcl::PointXYZ& p1, const pcl::PointXYZ& p2){
             return p1.z < p2.z;
         });
+        // std::cout<<"3333"<<std::endl;
         int max_ = sort_pt.size() * 0.8;
         for(int i = 0; i < max_; ++i){
             cloud.push_back(sort_pt[i]);
@@ -67,19 +77,19 @@ namespace LIO_SAM_SEMANTIC{
             Q_ = gtsam_quadrics::ConstrainedDualQuadric(gtsam::Pose3(), gtsam::Vector3(0, 0, 0));
             return;
         }
+        // std::cout<<"5555"<<std::endl;
         Eigen::Vector4f centroid;
         pcl::compute3DCentroid(cloud, centroid);
         pcl::PointXYZ min_pt, max_pt;
         pcl::getMinMax3D(cloud, min_pt, max_pt);
-
+        // std::cout<<"6666"<<std::endl;
         Eigen::Vector3f center = (max_pt.getVector3fMap() + min_pt.getVector3fMap())/2.0;
-
+        // std::cout<<"777"<<std::endl;
         Eigen::Matrix3f covariance;
         pcl::computeCovarianceMatrixNormalized(cloud, centroid, covariance);
         Eigen::SelfAdjointEigenSolver<Eigen::Matrix3f> eigen_solver(covariance, Eigen::ComputeEigenvectors);
         Eigen::Matrix3f eigenVectorsPCA = eigen_solver.eigenvectors();
 	    Eigen::Vector3f eigenValuesPCA  = eigen_solver.eigenvalues();
-
         eigenVectorsPCA.col(2) = eigenVectorsPCA.col(0).cross(eigenVectorsPCA.col(1)); 
         eigenVectorsPCA.col(0) = eigenVectorsPCA.col(1).cross(eigenVectorsPCA.col(2));
         eigenVectorsPCA.col(1) = eigenVectorsPCA.col(2).cross(eigenVectorsPCA.col(0));
@@ -109,17 +119,23 @@ namespace LIO_SAM_SEMANTIC{
 
         gtsam::Pose3 pose(transform3.matrix().cast<double>());
         Q_= gtsam_quadrics::ConstrainedDualQuadric(pose, box_dim.cast<double>()/ 2.0);
+        //std::cout<<"9999"<<std::endl;
         // return Q;
     }
 
+    gtsam_quadrics::ConstrainedDualQuadric Detection::Q() const{
+        return Q_;
+    }
+
     //=================Detection Group===========
-    DetectionGroup::DetectionGroup(const DetectionGroup& dg): stamp(dg.stamp), detections(dg.detections){
+    DetectionGroup::DetectionGroup(const DetectionGroup& dg): stamp(dg.stamp), detections(dg.detections), view(dg.view){
 
     }
 
     DetectionGroup& DetectionGroup::operator=(const DetectionGroup& dg){
         stamp = dg.stamp;
         detections = dg.detections;
+        view = dg.view;
         return *this;
     }
     //============================================

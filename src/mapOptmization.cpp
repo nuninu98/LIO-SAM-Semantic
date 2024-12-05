@@ -27,6 +27,8 @@ using symbol_shorthand::X; // Pose3 (x,y,z,r,p,y)
 using symbol_shorthand::V; // Vel   (xdot,ydot,zdot)
 using symbol_shorthand::B; // Bias  (ax,ay,az,gx,gy,gz)
 using symbol_shorthand::G; // GPS pose
+using symbol_shorthand::C; //Camera Pose
+using symbol_shorthand::O; //object
 
 /*
     * A point cloud type that has 6D pose info ([x,y,z,roll,pitch,yaw] intensity is time stamp)
@@ -58,6 +60,20 @@ private:
     ros::Publisher pub_cloud_;
     std::mutex object_lock_;
     queue<LIO_SAM_SEMANTIC::DetectionGroup> detection_buf_;
+    Eigen::Matrix4d map2Base_ = Eigen::Matrix4d::Identity();
+    ros::Subscriber sub_map_to_base_;
+    mutex mb_lock_;
+    
+    void map2BaseCallback(const nav_msgs::OdometryConstPtr& odom){
+        unique_lock<mutex> lock(mb_lock_);
+        map2Base_(0, 3) = odom->pose.pose.position.x;
+        map2Base_(1, 3) = odom->pose.pose.position.y;
+        map2Base_(2, 3) = odom->pose.pose.position.z;
+    
+        Eigen::Quaterniond qmb(odom->pose.pose.orientation.w, odom->pose.pose.orientation.x, odom->pose.pose.orientation.y, odom->pose.pose.orientation.z);
+        map2Base_.block<3, 3>(0, 0) = qmb.toRotationMatrix();
+    }
+    
     void yoloDepthCallback(const sensor_msgs::ImageConstPtr& depth_image, const yolo_protocol::YoloResultConstPtr& yolo_result, const Eigen::Matrix4d& sensor_pose, const Eigen::Matrix3d& K){
         sensor_msgs::ImageConstPtr color_img = boost::make_shared<sensor_msgs::Image const>(yolo_result->original);
         cv_bridge::CvImageConstPtr cv_rgb_bridge = cv_bridge::toCvShare(color_img, "bgr8");
@@ -65,10 +81,10 @@ private:
         cv::Mat image = cv_rgb_bridge->image.clone();
         cv::Mat depth_mat = cv_depth_bridge->image.clone();
         cv::Mat depth_scaled;
-        if((fabs(depth_factor_-1.0)>1e-5) || depth_mat.type()!=CV_64F){
-            depth_mat.convertTo(depth_scaled, CV_64F, 1.0/depth_factor_);
-        }
+        depth_mat.convertTo(depth_scaled, CV_32F, 1.0/depth_factor_);
+        
         LIO_SAM_SEMANTIC::DetectionGroup detection_groups;
+        detection_groups.stamp = ros::Time::now().toSec();
         for(int i = 0; i < yolo_result->detections.detections.size(); ++i){
             auto detect = yolo_result->detections.detections[i];
             cv::Rect roi(cv::Point(detect.bbox.center.x- detect.bbox.size_x/2, detect.bbox.center.y - detect.bbox.size_y/2), cv::Size(detect.bbox.size_x, detect.bbox.size_y));
@@ -82,38 +98,62 @@ private:
                 mask = cv::Mat::zeros(image.size(), CV_8U);
                 mask(roi) = 255;
             }
-
             
-            if(detect.header.frame_id == "desk"){ //temporarily disabled
-                continue;
-            }
             LIO_SAM_SEMANTIC::Detection det_p(roi, cv::Mat(), detect.header.frame_id);
             det_p.calcInitQuadric(depth_scaled, mask, K);
             detection_groups.detections.push_back(det_p);
+            detection_groups.view = image.clone();
+            //==========Debug========
+            // cv::rectangle(image, det_p.getROI_CV(), cv::Scalar(0, 0, 255));
+            // cv::putText(image, det_p.getClassName(), det_p.getROI_CV().tl(), 1, 1, cv::Scalar(255, 255, 255));
+            //=======================
         }
+        
         object_lock_.lock();
         detection_buf_.push(detection_groups);
+        if(detection_buf_.size() > 10){
+            detection_buf_.pop();
+        }
+        // cout<<"AAA"<<endl;
+        // gtsam::Pose3 Tlc(Tlc_);
+        // gtsam::Pose3 Twl = trans2gtsamPose(transformTobeMapped);
+        // gtsam::Pose3 Twc = Twl * Tlc;
+        // gtsam_quadrics::QuadricCamera qcam;
+        // gtsam::Cal3_S2::shared_ptr K_gtsam(new gtsam::Cal3_S2(K_(0, 0), K_(1, 1), 0.0, K_(0, 2), K_(1, 2))); 
+        // for(int i = 0; i < objects_.size(); ++i){
+        //     gtsam_quadrics::ConstrainedDualQuadric Q = objects_[i]->Q();
+        //     if(Q.isBehind(Twc) || Q.contains(Twc)){
+        //         continue;
+        //     }
+        //     gtsam_quadrics::AlignedBox2 bbox_est = qcam.project(Q, Twc, K_gtsam).bounds(); 
+        //     cv::Rect bbox_cv(bbox_est.xmin(), bbox_est.ymin(), bbox_est.width(), bbox_est.height());
+        //     cv::rectangle(image, bbox_cv, cv::Scalar(255, 0, 0));
+        // }
+        // cout<<"DDD"<<endl;
+        // cv::imshow("VIEW",image);
+        // cv::waitKey(1);
         object_lock_.unlock();
         // //===========Debug scale=====
-        // pcl::PointCloud<pcl::PointXYZ> cloud;
-        // for(int r = 0; r < depth_mat.rows; ++r){
-        //     for(int c = 0; c < depth_mat.cols; ++c){
-        //         double depth = depth_scaled.at<double>(r, c);
-        //         if(isnan(depth) || depth < 1.0e-4){
-        //             continue;
-        //         }
-        //         pcl::PointXYZ pt;
-        //         pt.x = (c - K(0, 2)) * depth / K(0, 0);
-        //         pt.y = (r - K(1, 2)) * depth / K(1, 1);
-        //         pt.z = depth;
-        //         cloud.push_back(pt);
-        //     }
-        // }
-        // sensor_msgs::PointCloud2 depth_cloud;
-        // pcl::toROSMsg(cloud, depth_cloud);
-        // depth_cloud.header.stamp = ros::Time::now();
-        // depth_cloud.header.frame_id = "camera_link";
-        // pub_cloud_.publish(depth_cloud);
+        
+        pcl::PointCloud<pcl::PointXYZ> cloud;
+        for(int r = 0; r < depth_mat.rows; ++r){
+            for(int c = 0; c < depth_mat.cols; ++c){
+                float depth = depth_scaled.at<float>(r, c);
+                if(isnan(depth) || depth < 1.0e-4){
+                    continue;
+                }
+                pcl::PointXYZ pt;
+                pt.x = (c - K(0, 2)) * depth / K(0, 0);
+                pt.y = (r - K(1, 2)) * depth / K(1, 1);
+                pt.z = depth;
+                cloud.push_back(pt);
+            }
+        }
+        sensor_msgs::PointCloud2 depth_cloud;
+        pcl::toROSMsg(cloud, depth_cloud);
+        depth_cloud.header.stamp = ros::Time::now();
+        depth_cloud.header.frame_id = "camera_link";
+        pub_cloud_.publish(depth_cloud);
         // //===========================
     }
 public:
@@ -139,6 +179,8 @@ public:
     ros::Publisher pubCloudRegisteredRaw;
     ros::Publisher pubLoopConstraintEdge;
 
+    ros::Publisher pubObjects;
+
     ros::Publisher pubSLAMInfo;
 
     ros::Subscriber subCloud;
@@ -162,7 +204,8 @@ public:
     pcl::PointCloud<PointType>::Ptr copy_cloudKeyPoses3D;
     pcl::PointCloud<PointTypePose>::Ptr copy_cloudKeyPoses6D;
 
-    vector<LIO_SAM_SEMANTIC::Object> objects_;
+    // vector<std::shared_ptr<LIO_SAM_SEMANTIC::Object>> objects_;
+    vector<LIO_SAM_SEMANTIC::Object*> objects_;
 
     pcl::PointCloud<PointType>::Ptr laserCloudCornerLast; // corner feature set from odoOptimization
     pcl::PointCloud<PointType>::Ptr laserCloudSurfLast; // surf feature set from odoOptimization
@@ -266,6 +309,10 @@ public:
         downSizeFilterSurroundingKeyPoses.setLeafSize(surroundingKeyframeDensity, surroundingKeyframeDensity, surroundingKeyframeDensity); // for surrounding key poses of scan-to-map optimization
 
         pub_cloud_ = nh.advertise<sensor_msgs::PointCloud2>("depth_cloud", 1);
+        pubObjects = nh.advertise<visualization_msgs::MarkerArray>("objects", 1);
+
+        
+        sub_map_to_base_ = nh.subscribe("lio_sam/map_to_base", 1, &mapOptimization::map2BaseCallback, this);
         allocateMemory();
     }
 
@@ -328,23 +375,21 @@ public:
         static double timeLastProcessing = -1;
         if (timeLaserInfoCur - timeLastProcessing >= mappingProcessInterval)
         {
+            
             timeLastProcessing = timeLaserInfoCur;
-
             updateInitialGuess();
-
             extractSurroundingKeyFrames();
-
             downsampleCurrentScan();
-
             scan2MapOptimization();
-
             saveKeyFramesAndFactor();
 
             correctPoses();
-
+            
             publishOdometry();
 
             publishFrames();
+
+            publishObjects();
         }
     }
 
@@ -873,7 +918,6 @@ public:
             transformTobeMapped[0] = cloudInfo.imuRollInit;
             transformTobeMapped[1] = cloudInfo.imuPitchInit;
             transformTobeMapped[2] = cloudInfo.imuYawInit;
-
             if (!useImuHeadingInitialization)
                 transformTobeMapped[2] = 0;
 
@@ -1460,16 +1504,19 @@ public:
     {
         if (cloudKeyPoses3D->points.empty())
         {
-            noiseModel::Diagonal::shared_ptr priorNoise = noiseModel::Diagonal::Variances((Vector(6) << 1e-2, 1e-2, M_PI*M_PI, 1e8, 1e8, 1e8).finished()); // rad*rad, meter*meter
-            gtSAMgraph.add(PriorFactor<Pose3>(0, trans2gtsamPose(transformTobeMapped), priorNoise));
-            initialEstimate.insert(0, trans2gtsamPose(transformTobeMapped));
+            //noiseModel::Diagonal::shared_ptr priorNoise = noiseModel::Diagonal::Variances((Vector(6) << 1e-2, 1e-2, M_PI*M_PI, 1e8, 1e8, 1e8).finished()); // rad*rad, meter*meter
+            noiseModel::Diagonal::shared_ptr priorNoise = noiseModel::Diagonal::Variances((Vector(6) << 1e-6, 1e-6, 1e-6, 1e-5, 1e-5, 1e-5).finished()); // rad*rad, meter*meter
+            gtSAMgraph.add(PriorFactor<Pose3>(X(0), trans2gtsamPose(transformTobeMapped), priorNoise));
+            initialEstimate.insert(X(0), trans2gtsamPose(transformTobeMapped));
         }else{
-            noiseModel::Diagonal::shared_ptr odometryNoise = noiseModel::Diagonal::Variances((Vector(6) << 1e-6, 1e-6, 1e-6, 1e-4, 1e-4, 1e-4).finished());
+            //noiseModel::Diagonal::shared_ptr odometryNoise = noiseModel::Diagonal::Variances((Vector(6) << 1e-6, 1e-6, 1e-6, 1e-4, 1e-4, 1e-4).finished());
+            noiseModel::Diagonal::shared_ptr odometryNoise = noiseModel::Diagonal::Variances((Vector(6) << 1e-2, 1e-2, 1e-2, 1e-3, 1e-3, 1e-3).finished());
             gtsam::Pose3 poseFrom = pclPointTogtsamPose3(cloudKeyPoses6D->points.back());
             gtsam::Pose3 poseTo   = trans2gtsamPose(transformTobeMapped);
-            gtSAMgraph.add(BetweenFactor<Pose3>(cloudKeyPoses3D->size()-1, cloudKeyPoses3D->size(), poseFrom.between(poseTo), odometryNoise));
-            initialEstimate.insert(cloudKeyPoses3D->size(), poseTo);
+            gtSAMgraph.add(BetweenFactor<Pose3>(X(cloudKeyPoses3D->size()-1), X(cloudKeyPoses3D->size()), poseFrom.between(poseTo), odometryNoise));
+            initialEstimate.insert(X(cloudKeyPoses3D->size()), poseTo);
         }
+        
     }
 
     void addGPSFactor()
@@ -1563,7 +1610,7 @@ public:
             int indexTo = loopIndexQueue[i].second;
             gtsam::Pose3 poseBetween = loopPoseQueue[i];
             gtsam::noiseModel::Diagonal::shared_ptr noiseBetween = loopNoiseQueue[i];
-            gtSAMgraph.add(BetweenFactor<Pose3>(indexFrom, indexTo, poseBetween, noiseBetween));
+            gtSAMgraph.add(BetweenFactor<Pose3>(X(indexFrom), X(indexTo), poseBetween, noiseBetween));
         }
 
         loopIndexQueue.clear();
@@ -1571,21 +1618,20 @@ public:
         loopNoiseQueue.clear();
         aLoopIsClosed = true;
     }
-    void addSemanticFactor(){
+    void addSemanticFactor(){ // after odom factor
         
         int boundary_thresh = 10;
         int img_width = 640;
         int img_height = 480; 
         cv::Rect screen(0, 0, img_width, img_height);
         unique_lock<mutex> lock(object_lock_);
-        double stamp = ros::Time::now().toSec();
         LIO_SAM_SEMANTIC::DetectionGroup dg;
         while(!detection_buf_.empty()){
             double obj_stamp = detection_buf_.front().stamp;
-            if(obj_stamp > stamp){
+            if(obj_stamp > timeLaserInfoCur){
                 break;
             }
-            if(stamp - obj_stamp < 0.1){
+            if(timeLaserInfoCur - obj_stamp < 0.1){
                 if(dg.stamp < 0.0){
                     dg = detection_buf_.front();
                 }
@@ -1595,10 +1641,137 @@ public:
             }
             detection_buf_.pop();
         }
+        gtsam::Pose3 Tlc(Tlc_);
+        gtsam::Pose3 Twl = trans2gtsamPose(transformTobeMapped);
+        gtsam::Pose3 Twc = Twl * Tlc;
+        gtsam_quadrics::QuadricCamera quadric_cam;
+        size_t key_id = X(cloudKeyPoses3D-> empty() ? 0 : cloudKeyPoses3D->size());
+        size_t sensor_id = C(cloudKeyPoses3D-> empty() ? 0 : cloudKeyPoses3D->size());
+        
+        unordered_map<const LIO_SAM_SEMANTIC::Detection*, LIO_SAM_SEMANTIC::Object*> matches;
         for(const auto& det : dg.detections){
+            gtsam::Cal3_S2::shared_ptr K_gtsam(new gtsam::Cal3_S2(K_(0, 0), K_(1, 1), 0.0, K_(0, 2), K_(1, 2))); 
+            if(!initialEstimate.exists(sensor_id)){
+                initialEstimate.insert(sensor_id, Twc);
+                noiseModel::Diagonal::shared_ptr mountNoise = noiseModel::Diagonal::Variances((Vector(6) << 1e-5, 1e-5, 1e-5, 1e-5, 1e-5, 1e-5).finished());
+                BetweenFactor<Pose3>mount(key_id, sensor_id, Tlc, mountNoise);
+                gtSAMgraph.add(mount);
+            }
+            double max_iou = 0.0;
+            LIO_SAM_SEMANTIC::Object* matched_obj = nullptr;
+            gtsam_quadrics::AlignedBox2 meas = det.getROI();
+            for(int i = 0; i < objects_.size(); ++i){
+                gtsam_quadrics::ConstrainedDualQuadric Q_obj = objects_[i]->Q(); 
+                if(Q_obj.contains(Twc) || Q_obj.isBehind(Twc)){
+                    continue;
+                }
+                gtsam_quadrics::AlignedBox2 est = quadric_cam.project(Q_obj, Twc, K_gtsam).bounds();
+                cv::Rect est_cv(est.xmin(), est.ymin(), est.width(), est.height());
+                cv::Rect inter = est_cv & screen;
+                est = gtsam_quadrics::AlignedBox2(inter.x, inter.y, inter.x + inter.width, inter.y+ inter.height);
+                double iou = meas.iou(est);
+                if(iou > max_iou){
+                    matched_obj = objects_[i];
+                    //matched_obj = objects_[i].get();
+                    max_iou = iou;
+                }
+            }
+            bool matched = false;
+            if(matched_obj == nullptr){
+                matched = false;
+            }
+            else{
+                matched = max_iou > 0.2;
+                if(!matched){
+                    gtsam::Point3 q_center =  Twc.transformFrom(det.Q().centroid());
+                    if((q_center - matched_obj->Q().centroid()).norm() < max(det.Q().radii().norm(), matched_obj->Q().radii().norm())){
+                        matched = true;
+                    }
+                }
+            }
+            Vector4 bbox_noise_vec(50.0, 50.0, 50.0, 50.0);
+            // if(max_iou > 1.0e-5){
+            //     bbox_noise_vec = bbox_noise_vec * (1.0 / max_iou);
+            // }
+            auto bbox_noise = gtsam::noiseModel::Diagonal::Sigmas(bbox_noise_vec);
+            if(matched){
+                if(meas.xmin() < boundary_thresh || meas.xmax() > img_width - boundary_thresh || meas.ymin() < boundary_thresh || meas.ymax() > img_height - boundary_thresh){
+                    continue;
+                }
+                cout<<"MATCHED"<<endl;
+                gtsam_quadrics::BoundingBoxFactor bbf(det.getROI(), K_gtsam, sensor_id, O(matched_obj->id()), bbox_noise, gtsam_quadrics::BoundingBoxFactor::STANDARD);
+                gtSAMgraph.add(bbf);
+                matches.insert({&det, matched_obj});
+            }
+            else{ // registerObject
+                gtsam_quadrics::ConstrainedDualQuadric dQc = det.Q();
+                gtsam::Pose3 dQc_pose = dQc.pose();
 
+                if(dQc_pose.z() < 0){
+                    continue;
+                }
+                if(det.Q().radii().norm() < 1.0e-3){
+                    continue;
+                }
+                gtsam::Pose3 dQw_pose = Twc.transformPoseFrom(dQc_pose);
+                gtsam_quadrics::ConstrainedDualQuadric Q(dQw_pose, dQc.radii());
+                gtsam_quadrics::AlignedBox2 est_box = quadric_cam.project(Q, Twc, K_gtsam).bounds();
+                if(est_box.iou(det.getROI()) < 0.15){
+                    cout<<"CC"<<endl;
+                    continue;
+                }
+                //std::shared_ptr<LIO_SAM_SEMANTIC::Object> new_obj(new LIO_SAM_SEMANTIC::Object(det.getClassName(), objects_.size(), Q));
+                LIO_SAM_SEMANTIC::Object* new_obj = new LIO_SAM_SEMANTIC::Object(det.getClassName(), objects_.size(), Q);
+                Eigen::VectorXd opf_noise_vec = Eigen::VectorXd::Ones(9);
+                auto init_obj_noise = gtsam::noiseModel::Diagonal::Sigmas(opf_noise_vec);
+                gtsam::PriorFactor<gtsam_quadrics::ConstrainedDualQuadric> opf(O(new_obj->id()), Q, init_obj_noise);
+                initialEstimate.insert(O(new_obj->id()), Q);
+                gtSAMgraph.add(opf);
+                gtsam_quadrics::BoundingBoxFactor bbf(det.getROI(), K_gtsam, sensor_id, O(new_obj->id()), bbox_noise, gtsam_quadrics::BoundingBoxFactor::TRUNCATED);
+                gtSAMgraph.add(bbf);
+                objects_.push_back(new_obj);
+            } 
         }
 
+        //=========Debug==================
+        if(!matches.empty()){
+            cv::Mat dg_view = dg.view.clone();
+            int cnt = 0;
+            gtsam_quadrics::QuadricCamera qcam;
+            gtsam::Cal3_S2::shared_ptr K_gtsam(new gtsam::Cal3_S2(K_(0, 0), K_(1, 1), 0.0, K_(0, 2), K_(1, 2))); 
+            for(auto& corr : matches){
+                cv::rectangle(dg_view, corr.first->getROI_CV(), cv::Scalar(0, 0, 255));
+                cv::putText(dg_view, to_string(cnt), corr.first->getROI_CV().tl(), 1, 1, cv::Scalar(0, 0, 255));
+                
+                gtsam_quadrics::ConstrainedDualQuadric Q = corr.second->Q();
+                gtsam_quadrics::AlignedBox2 bbox_est = qcam.project(Q, Twc, K_gtsam).bounds(); 
+                cv::Rect bbox_cv(bbox_est.xmin(), bbox_est.ymin(), bbox_est.width(), bbox_est.height());
+                cv::rectangle(dg_view, bbox_cv, cv::Scalar(255, 0, 0));
+                cv::putText(dg_view, to_string(cnt), bbox_cv.tl(), 1, 1, cv::Scalar(255, 0, 0));
+                cnt++;
+            }
+            // for(const auto& det : dg.detections){
+            //     cv::rectangle(dg_view, det.getROI_CV(), cv::Scalar(0, 0, 255));
+            //     cv::putText(dg_view, det.getClassName(), det.getROI_CV().tl(), 1, 1, cv::Scalar(255, 255, 255));
+            // }
+
+            // gtsam_quadrics::QuadricCamera qcam;
+            // gtsam::Cal3_S2::shared_ptr K_gtsam(new gtsam::Cal3_S2(K_(0, 0), K_(1, 1), 0.0, K_(0, 2), K_(1, 2))); 
+            // for(int i = 0; i < objects_.size(); ++i){
+            //     gtsam_quadrics::ConstrainedDualQuadric Q = objects_[i]->Q();
+            //     if(Q.isBehind(Twc) || Q.contains(Twc)){
+            //         continue;
+            //     }
+            //     gtsam_quadrics::AlignedBox2 bbox_est = qcam.project(Q, Twc, K_gtsam).bounds(); 
+            //     cv::Rect bbox_cv(bbox_est.xmin(), bbox_est.ymin(), bbox_est.width(), bbox_est.height());
+            //     cv::rectangle(dg_view, bbox_cv, cv::Scalar(255, 0, 0));
+            // }
+            if(!dg_view.empty()){
+                cv::imwrite("/home/nuninu98/test.png", dg_view);
+                cv::waitKey(1);
+            }
+        }
+        //================================
     }
 
     void saveKeyFramesAndFactor()
@@ -1608,6 +1781,8 @@ public:
 
         // odom factor
         addOdomFactor();
+
+        addSemanticFactor();
 
         // gps factor
         addGPSFactor();
@@ -1638,9 +1813,9 @@ public:
         PointType thisPose3D;
         PointTypePose thisPose6D;
         Pose3 latestEstimate;
-
+        size_t last_pose_key = X(cloudKeyPoses3D->size());
         isamCurrentEstimate = isam->calculateEstimate();
-        latestEstimate = isamCurrentEstimate.at<Pose3>(isamCurrentEstimate.size()-1);
+        latestEstimate = isamCurrentEstimate.at<Pose3>(last_pose_key);
         // cout << "****************************************************" << endl;
         // isamCurrentEstimate.print("Current estimate: ");
 
@@ -1660,11 +1835,18 @@ public:
         thisPose6D.time = timeLaserInfoCur;
         cloudKeyPoses6D->push_back(thisPose6D);
 
+        unique_lock<mutex> lock(object_lock_);
+        for(int i = 0; i < objects_.size(); ++i){
+            cout<<"Q BEF: "<<objects_[i]->Q().centroid().transpose()<<" "<<objects_[i]->Q().radii().transpose()<<endl;
+            gtsam_quadrics::ConstrainedDualQuadric Q_aft = isamCurrentEstimate.at<gtsam_quadrics::ConstrainedDualQuadric>(O(i));
+            objects_[i]->setQ(Q_aft);
+            cout<<"Q AFT: "<<Q_aft.centroid().transpose()<<" "<<Q_aft.radii().transpose()<<endl;
+        }
         // cout << "****************************************************" << endl;
         // cout << "Pose covariance:" << endl;
         // cout << isam->marginalCovariance(isamCurrentEstimate.size()-1) << endl << endl;
-        poseCovariance = isam->marginalCovariance(isamCurrentEstimate.size()-1);
-
+        //poseCovariance = isam->marginalCovariance(isamCurrentEstimate.size()-1);
+        poseCovariance = isam->marginalCovariance(last_pose_key);
         // save updated transform
         transformTobeMapped[0] = latestEstimate.rotation().roll();
         transformTobeMapped[1] = latestEstimate.rotation().pitch();
@@ -1699,22 +1881,23 @@ public:
             // clear path
             globalPath.poses.clear();
             // update key poses
-            int numPoses = isamCurrentEstimate.size();
+            int numPoses = cloudKeyPoses3D->size(); //isamCurrentEstimate.size();
             for (int i = 0; i < numPoses; ++i)
             {
-                cloudKeyPoses3D->points[i].x = isamCurrentEstimate.at<Pose3>(i).translation().x();
-                cloudKeyPoses3D->points[i].y = isamCurrentEstimate.at<Pose3>(i).translation().y();
-                cloudKeyPoses3D->points[i].z = isamCurrentEstimate.at<Pose3>(i).translation().z();
+                cloudKeyPoses3D->points[i].x = isamCurrentEstimate.at<Pose3>(X(i)).translation().x();
+                cloudKeyPoses3D->points[i].y = isamCurrentEstimate.at<Pose3>(X(i)).translation().y();
+                cloudKeyPoses3D->points[i].z = isamCurrentEstimate.at<Pose3>(X(i)).translation().z();
 
                 cloudKeyPoses6D->points[i].x = cloudKeyPoses3D->points[i].x;
                 cloudKeyPoses6D->points[i].y = cloudKeyPoses3D->points[i].y;
                 cloudKeyPoses6D->points[i].z = cloudKeyPoses3D->points[i].z;
-                cloudKeyPoses6D->points[i].roll  = isamCurrentEstimate.at<Pose3>(i).rotation().roll();
-                cloudKeyPoses6D->points[i].pitch = isamCurrentEstimate.at<Pose3>(i).rotation().pitch();
-                cloudKeyPoses6D->points[i].yaw   = isamCurrentEstimate.at<Pose3>(i).rotation().yaw();
+                cloudKeyPoses6D->points[i].roll  = isamCurrentEstimate.at<Pose3>(X(i)).rotation().roll();
+                cloudKeyPoses6D->points[i].pitch = isamCurrentEstimate.at<Pose3>(X(i)).rotation().pitch();
+                cloudKeyPoses6D->points[i].yaw   = isamCurrentEstimate.at<Pose3>(X(i)).rotation().yaw();
 
                 updatePath(cloudKeyPoses6D->points[i]);
             }
+           
 
             aLoopIsClosed = false;
         }
@@ -1806,6 +1989,38 @@ public:
                 laserOdomIncremental.pose.covariance[0] = 0;
         }
         pubLaserOdometryIncremental.publish(laserOdomIncremental);
+    }
+
+    void publishObjects(){
+        visualization_msgs::MarkerArray obj_markers;
+        size_t id = 0;
+        for(const auto& obj : objects_){
+            visualization_msgs::Marker obj_marker;
+            obj_marker.type = visualization_msgs::Marker::SPHERE;
+            obj_marker.id = id;
+            id++;
+            obj_marker.header.stamp = ros::Time::now();
+            obj_marker.header.frame_id =odometryFrame;
+           
+            obj_marker.color.a = 0.6;
+            obj_marker.color.r = 0.0;
+            obj_marker.color.g = 255.0;
+            obj_marker.color.b = 0.0;
+            
+            
+            obj_marker.pose.position.x = obj->Q().centroid().x();
+            obj_marker.pose.position.y = obj->Q().centroid().y();
+            obj_marker.pose.position.z = obj->Q().centroid().z();
+            obj_marker.pose.orientation.w = obj->Q().pose().rotation().toQuaternion().w();
+            obj_marker.pose.orientation.x = obj->Q().pose().rotation().toQuaternion().x();
+            obj_marker.pose.orientation.y = obj->Q().pose().rotation().toQuaternion().y();
+            obj_marker.pose.orientation.z = obj->Q().pose().rotation().toQuaternion().z();
+            obj_marker.scale.x = obj->Q().radii()(0);
+            obj_marker.scale.y = obj->Q().radii()(1);
+            obj_marker.scale.z = obj->Q().radii()(2);
+            obj_markers.markers.push_back(obj_marker);
+        }
+        pubObjects.publish(obj_markers);
     }
 
     void publishFrames()

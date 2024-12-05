@@ -8,6 +8,7 @@ using namespace std;
 
 namespace LIO_SAM_SEMANTIC{
     class Object{
+        public:
             EIGEN_MAKE_ALIGNED_OPERATOR_NEW
         private:
             size_t id_;
@@ -20,6 +21,8 @@ namespace LIO_SAM_SEMANTIC{
             
             Object(const string& name, size_t id, const gtsam_quadrics::ConstrainedDualQuadric& Q);
 
+            ~Object();
+            
             string getClassName() const;
 
             size_t id() const;

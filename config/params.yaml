@@ -13,7 +13,7 @@ lio_sam:
   mapFrame: "map"
 
   # GPS Settings
-  useImuHeadingInitialization: true           # if using GPS data, set to "true"
+  useImuHeadingInitialization: false #true           # if using GPS data, set to "true"
   useGpsElevation: false                      # if GPS elevation is bad, set to "false"
   gpsCovThreshold: 2.0                        # m^2, threshold for using GPS data
   poseCovThreshold: 25.0                      # m^2, threshold for using GPS data
@@ -73,7 +73,7 @@ lio_sam:
   mappingProcessInterval: 0.15                  # seconds, regulate mapping frequency
 
   # Surrounding map
-  surroundingkeyframeAddingDistThreshold: 1.0   # meters, regulate keyframe adding threshold
+  surroundingkeyframeAddingDistThreshold: 0.05   # meters, regulate keyframe adding threshold
   surroundingkeyframeAddingAngleThreshold: 0.2  # radians, regulate keyframe adding threshold
   surroundingKeyframeDensity: 2.0               # meters, downsample surrounding keyframe poses   
   surroundingKeyframeSearchRadius: 50.0         # meters, within n meters scan-to-map optimization (when loop closure disabled)
@@ -95,7 +95,11 @@ lio_sam:
   K: [528.433756558705, 0.0, 320.5, 0.0, 528.433756558705, 240.5, 0.0, 0.0, 1.0]
   rgb_topic: /image_raw
   depth_topic: /depth/image_raw
-  camera_trans: [0.0, 0.0, 0.1] # Tcl
+  camera_trans: [0.0, 0.0, 0.1] # Tlc
+  # camera_rot: [1.0, 0.0, 0.0,
+  #             0.0, 1.0, 0.0, 
+  #             0.0, 0.0, 1.0]
+  # camera_trans: [0.0, 0.0, 0.1] # Tcl
   camera_rot: [0.0, 0.0, 1.0,
               -1.0, 0.0, 0.0, 
               0.0, -1.0, 0.0]

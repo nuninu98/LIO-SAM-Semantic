@@ -157,6 +157,8 @@ public:
     string rgb_topic_; 
     string depth_topic_;
     Eigen::Matrix3d K_;
+
+    Eigen::Matrix4d Tlc_; 
     ParamServer()
     {
         nh.param<std::string>("/robot_id", robot_id, "roboat");
@@ -172,6 +174,7 @@ public:
         nh.param<std::string>("lio_sam/mapFrame", mapFrame, "map");
 
         nh.param<bool>("lio_sam/useImuHeadingInitialization", useImuHeadingInitialization, false);
+        cout<<"HEADING INIT: "<<useImuHeadingInitialization<<endl;
         nh.param<bool>("lio_sam/useGpsElevation", useGpsElevation, false);
         nh.param<float>("lio_sam/gpsCovThreshold", gpsCovThreshold, 2.0);
         nh.param<float>("lio_sam/poseCovThreshold", poseCovThreshold, 25.0);
@@ -265,6 +268,24 @@ public:
         K_(2, 0) = K_vec[6];
         K_(2, 1) = K_vec[7];
         K_(2, 2) = K_vec[8];
+
+        Tlc_ = Eigen::Matrix4d::Identity();
+        std::vector<double> trans, rot;
+        nh.param<std::vector<double>>("lio_sam/camera_trans",trans ,std::vector<double>());
+        Tlc_(0, 3) = trans[0];
+        Tlc_(1, 3) = trans[1];
+        Tlc_(2, 3) = trans[2];
+
+        nh.param<std::vector<double>>("lio_sam/camera_rot",rot ,std::vector<double>());
+        Tlc_(0, 0) = rot[0];
+        Tlc_(0, 1) = rot[1];
+        Tlc_(0, 2) = rot[2];
+        Tlc_(1, 0) = rot[3];
+        Tlc_(1, 1) = rot[4];
+        Tlc_(1, 2) = rot[5];
+        Tlc_(2, 0) = rot[6];
+        Tlc_(2, 1) = rot[7];
+        Tlc_(2, 2) = rot[8];
         usleep(100);
     }
 
