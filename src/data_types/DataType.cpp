@@ -69,7 +69,7 @@ namespace LIO_SAM_SEMANTIC{
             return p1.z < p2.z;
         });
         // std::cout<<"3333"<<std::endl;
-        int max_ = sort_pt.size() * 0.8;
+        int max_ = sort_pt.size() * 0.95;
         for(int i = 0; i < max_; ++i){
             cloud.push_back(sort_pt[i]);
         }
