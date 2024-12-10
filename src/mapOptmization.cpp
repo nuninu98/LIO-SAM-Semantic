@@ -99,7 +99,9 @@ private:
                 mask = cv::Mat::zeros(image.size(), CV_8U);
                 mask(roi) = 255;
             }
-            
+            if(detect.header.frame_id == "bench"){
+                continue;
+            }
             LIO_SAM_SEMANTIC::Detection det_p(roi, cv::Mat(), detect.header.frame_id);
             det_p.calcInitQuadric(depth_scaled, mask, K);
             detection_groups.detections.push_back(det_p);
@@ -115,24 +117,6 @@ private:
         if(detection_buf_.size() > 10){
             detection_buf_.pop();
         }
-        // cout<<"AAA"<<endl;
-        // gtsam::Pose3 Tlc(Tlc_);
-        // gtsam::Pose3 Twl = trans2gtsamPose(transformTobeMapped);
-        // gtsam::Pose3 Twc = Twl * Tlc;
-        // gtsam_quadrics::QuadricCamera qcam;
-        // gtsam::Cal3_S2::shared_ptr K_gtsam(new gtsam::Cal3_S2(K_(0, 0), K_(1, 1), 0.0, K_(0, 2), K_(1, 2))); 
-        // for(int i = 0; i < objects_.size(); ++i){
-        //     gtsam_quadrics::ConstrainedDualQuadric Q = objects_[i]->Q();
-        //     if(Q.isBehind(Twc) || Q.contains(Twc)){
-        //         continue;
-        //     }
-        //     gtsam_quadrics::AlignedBox2 bbox_est = qcam.project(Q, Twc, K_gtsam).bounds(); 
-        //     cv::Rect bbox_cv(bbox_est.xmin(), bbox_est.ymin(), bbox_est.width(), bbox_est.height());
-        //     cv::rectangle(image, bbox_cv, cv::Scalar(255, 0, 0));
-        // }
-        // cout<<"DDD"<<endl;
-        // cv::imshow("VIEW",image);
-        // cv::waitKey(1);
         det_lock_.unlock();
         // //===========Debug scale=====
         
@@ -376,16 +360,19 @@ public:
         static double timeLastProcessing = -1;
         if (timeLaserInfoCur - timeLastProcessing >= mappingProcessInterval)
         {
-            
             timeLastProcessing = timeLaserInfoCur;
             updateInitialGuess();
+          
             extractSurroundingKeyFrames();
-            downsampleCurrentScan();
-            scan2MapOptimization();
-            saveKeyFramesAndFactor();
 
-            correctPoses();
+            downsampleCurrentScan();
+           
+            scan2MapOptimization();
             
+            saveKeyFramesAndFactor();
+   
+            correctPoses();
+           
             publishOdometry();
 
             publishFrames();
@@ -1404,29 +1391,32 @@ public:
 
     void scan2MapOptimization()
     {
-        if (cloudKeyPoses3D->points.empty())
+        if (cloudKeyPoses3D->points.empty()){
             return;
+        }
+            
 
         if (laserCloudCornerLastDSNum > edgeFeatureMinValidNum && laserCloudSurfLastDSNum > surfFeatureMinValidNum)
         {
             kdtreeCornerFromMap->setInputCloud(laserCloudCornerFromMapDS);
             kdtreeSurfFromMap->setInputCloud(laserCloudSurfFromMapDS);
-
             for (int iterCount = 0; iterCount < 30; iterCount++)
             {
                 laserCloudOri->clear();
                 coeffSel->clear();
-
+                
                 cornerOptimization();
+                
                 surfOptimization();
-
+             
                 combineOptimizationCoeffs();
-
+             
                 if (LMOptimization(iterCount) == true)
                     break;              
             }
 
             transformUpdate();
+            
         } else {
             ROS_WARN("Not enough features! Only %d edge and %d planar features available.", laserCloudCornerLastDSNum, laserCloudSurfLastDSNum);
         }
@@ -1653,9 +1643,9 @@ public:
         unordered_map<int, pair<LIO_SAM_SEMANTIC::Object*, double>> matches;
 
         Vector4 bbox_noise_vec(50.0, 50.0, 50.0, 50.0);
-        //     // if(max_iou > 1.0e-5){
-        //     //     bbox_noise_vec = bbox_noise_vec * (1.0 / max_iou);
-        //     // }
+            // if(max_iou > 1.0e-5){
+            //     bbox_noise_vec = bbox_noise_vec * (1.0 / max_iou);
+            // }
         auto bbox_noise = gtsam::noiseModel::Diagonal::Sigmas(bbox_noise_vec);
         if(!initialEstimate.exists(sensor_id)){
             initialEstimate.insert(sensor_id, Twc);
@@ -1681,9 +1671,9 @@ public:
                 if(objects_[i]->getClassName() != dg.detections[j].getClassName()){
                     continue;
                 }
-                if(dg.detections[j].getROI().xmin() < boundary_thresh || dg.detections[j].getROI().xmax() > img_width - boundary_thresh || dg.detections[j].getROI().ymin() < boundary_thresh || dg.detections[j].getROI().ymax() > img_height - boundary_thresh){
-                     continue;
-                }
+                // if(dg.detections[j].getROI().xmin() < boundary_thresh || dg.detections[j].getROI().xmax() > img_width - boundary_thresh || dg.detections[j].getROI().ymin() < boundary_thresh || dg.detections[j].getROI().ymax() > img_height - boundary_thresh){
+                //     continue;
+                // }
                 double iou = dg.detections[j].getROI().iou(est);
                 if(iou > max_iou){
                     max_iou = iou;
@@ -1700,7 +1690,9 @@ public:
             }
             else if(max_iou_det != -1){
                 gtsam::Point3 q_center =  Twc.transformFrom(dg.detections[max_iou_det].Q().centroid());
-                if((q_center - objects_[i]->Q().centroid()).norm() < max(dg.detections[max_iou_det].Q().radii().norm(), objects_[i]->Q().radii().norm())){
+                double d1 = (q_center - objects_[i]->Q().centroid()).norm();
+                double d2 = max(dg.detections[max_iou_det].Q().radii().norm(), objects_[i]->Q().radii().norm());
+                if(d1 < d2){
                     if(matches.find(max_iou_det) == matches.end()){
                         matches.insert({max_iou_det, {objects_[i], max_iou}});
                     }
@@ -1711,6 +1703,9 @@ public:
             }
         }
         for(const auto& corr: matches){
+            if(dg.detections[corr.first].getROI().xmin() < boundary_thresh || dg.detections[corr.first].getROI().xmax() > img_width - boundary_thresh || dg.detections[corr.first].getROI().ymin() < boundary_thresh || dg.detections[corr.first].getROI().ymax() > img_height - boundary_thresh){
+                continue;
+            }
             gtsam_quadrics::BoundingBoxFactor bbf(dg.detections[corr.first].getROI(), K_gtsam, sensor_id, O(corr.second.first->id()), bbox_noise, gtsam_quadrics::BoundingBoxFactor::STANDARD);
             gtSAMgraph.add(bbf);
         }
@@ -1728,11 +1723,11 @@ public:
             if(det.Q().radii().norm() < 1.0e-3){
                 continue;
             }
+            
             gtsam::Pose3 dQw_pose = Twc.transformPoseFrom(dQc_pose);
             gtsam_quadrics::ConstrainedDualQuadric Q(dQw_pose, dQc.radii());
             gtsam_quadrics::AlignedBox2 est_box = quadric_cam.project(Q, Twc, K_gtsam).bounds();
             if(est_box.iou(det.getROI()) < 0.15){
-                cout<<"CC"<<endl;
                 continue;
             }
             //std::shared_ptr<LIO_SAM_SEMANTIC::Object> new_obj(new LIO_SAM_SEMANTIC::Object(det.getClassName(), objects_.size(), Q));
@@ -1978,26 +1973,27 @@ public:
             // clear path
             globalPath.poses.clear();
             // update key poses
-            int numPoses = cloudKeyPoses3D->size(); //isamCurrentEstimate.size();
-            for (int i = 0; i < numPoses; ++i)
-            {
-                cloudKeyPoses3D->points[i].x = isamCurrentEstimate.at<Pose3>(X(i)).translation().x();
-                cloudKeyPoses3D->points[i].y = isamCurrentEstimate.at<Pose3>(X(i)).translation().y();
-                cloudKeyPoses3D->points[i].z = isamCurrentEstimate.at<Pose3>(X(i)).translation().z();
-
-                cloudKeyPoses6D->points[i].x = cloudKeyPoses3D->points[i].x;
-                cloudKeyPoses6D->points[i].y = cloudKeyPoses3D->points[i].y;
-                cloudKeyPoses6D->points[i].z = cloudKeyPoses3D->points[i].z;
-                cloudKeyPoses6D->points[i].roll  = isamCurrentEstimate.at<Pose3>(X(i)).rotation().roll();
-                cloudKeyPoses6D->points[i].pitch = isamCurrentEstimate.at<Pose3>(X(i)).rotation().pitch();
-                cloudKeyPoses6D->points[i].yaw   = isamCurrentEstimate.at<Pose3>(X(i)).rotation().yaw();
-
-                updatePath(cloudKeyPoses6D->points[i]);
-            }
-           
+            
 
             aLoopIsClosed = false;
         }
+        int numPoses = cloudKeyPoses3D->size(); //isamCurrentEstimate.size();
+        for (int i = 0; i < numPoses; ++i)
+        {
+            cloudKeyPoses3D->points[i].x = isamCurrentEstimate.at<Pose3>(X(i)).translation().x();
+            cloudKeyPoses3D->points[i].y = isamCurrentEstimate.at<Pose3>(X(i)).translation().y();
+            cloudKeyPoses3D->points[i].z = isamCurrentEstimate.at<Pose3>(X(i)).translation().z();
+
+            cloudKeyPoses6D->points[i].x = cloudKeyPoses3D->points[i].x;
+            cloudKeyPoses6D->points[i].y = cloudKeyPoses3D->points[i].y;
+            cloudKeyPoses6D->points[i].z = cloudKeyPoses3D->points[i].z;
+            cloudKeyPoses6D->points[i].roll  = isamCurrentEstimate.at<Pose3>(X(i)).rotation().roll();
+            cloudKeyPoses6D->points[i].pitch = isamCurrentEstimate.at<Pose3>(X(i)).rotation().pitch();
+            cloudKeyPoses6D->points[i].yaw   = isamCurrentEstimate.at<Pose3>(X(i)).rotation().yaw();
+
+            updatePath(cloudKeyPoses6D->points[i]);
+        }
+           
     }
 
     void updatePath(const PointTypePose& pose_in)
@@ -2116,6 +2112,17 @@ public:
             obj_marker.scale.y = obj->Q().radii()(1);
             obj_marker.scale.z = obj->Q().radii()(2);
             obj_markers.markers.push_back(obj_marker);
+
+            visualization_msgs::Marker obj_name = obj_marker;
+            obj_name.type = visualization_msgs::Marker::TEXT_VIEW_FACING;
+            obj_name.text = obj->getClassName();
+            obj_name.id = id;
+            id++;
+            obj_marker.color.a = 1.0;
+            obj_marker.color.r = 255.0;
+            obj_marker.color.g = 255.0;
+            obj_marker.color.b = 255.0;
+            obj_markers.markers.push_back(obj_name);
         }
         pubObjects.publish(obj_markers);
     }
