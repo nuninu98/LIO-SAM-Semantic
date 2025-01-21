@@ -63,6 +63,7 @@ private:
     Eigen::Matrix4d map2Base_ = Eigen::Matrix4d::Identity();
     ros::Subscriber sub_map_to_base_;
     mutex mb_lock_;
+
     int last_oid_ = -1;
     
     void map2BaseCallback(const nav_msgs::OdometryConstPtr& odom){
@@ -118,27 +119,29 @@ private:
             detection_buf_.pop();
         }
         det_lock_.unlock();
+
+        
         // //===========Debug scale=====
         
-        pcl::PointCloud<pcl::PointXYZ> cloud;
-        for(int r = 0; r < depth_mat.rows; ++r){
-            for(int c = 0; c < depth_mat.cols; ++c){
-                float depth = depth_scaled.at<float>(r, c);
-                if(isnan(depth) || depth < 1.0e-4){
-                    continue;
-                }
-                pcl::PointXYZ pt;
-                pt.x = (c - K(0, 2)) * depth / K(0, 0);
-                pt.y = (r - K(1, 2)) * depth / K(1, 1);
-                pt.z = depth;
-                cloud.push_back(pt);
-            }
-        }
-        sensor_msgs::PointCloud2 depth_cloud;
-        pcl::toROSMsg(cloud, depth_cloud);
-        depth_cloud.header.stamp = ros::Time::now();
-        depth_cloud.header.frame_id = "camera_link";
-        pub_cloud_.publish(depth_cloud);
+        // pcl::PointCloud<pcl::PointXYZ> cloud;
+        // for(int r = 0; r < depth_mat.rows; ++r){
+        //     for(int c = 0; c < depth_mat.cols; ++c){
+        //         float depth = depth_scaled.at<float>(r, c);
+        //         if(isnan(depth) || depth < 1.0e-4){
+        //             continue;
+        //         }
+        //         pcl::PointXYZ pt;
+        //         pt.x = (c - K(0, 2)) * depth / K(0, 0);
+        //         pt.y = (r - K(1, 2)) * depth / K(1, 1);
+        //         pt.z = depth;
+        //         cloud.push_back(pt);
+        //     }
+        // }
+        // sensor_msgs::PointCloud2 depth_cloud;
+        // pcl::toROSMsg(cloud, depth_cloud);
+        // depth_cloud.header.stamp = ros::Time::now();
+        // depth_cloud.header.frame_id = "camera_link";
+        // pub_cloud_.publish(depth_cloud);
         // //===========================
     }
 public:
@@ -1729,7 +1732,6 @@ public:
             LIO_SAM_SEMANTIC::Detection det = dg.detections[i];
             gtsam_quadrics::ConstrainedDualQuadric dQc = det.Q();
             gtsam::Pose3 dQc_pose = dQc.pose();
-
             if(dQc_pose.z() < 0){
                 continue;
             }
@@ -1880,6 +1882,23 @@ public:
         //================================
     }
 
+    void optimizeGraph(){
+        isam->update(gtSAMgraph, initialEstimate);
+        isam->update();
+
+        if (aLoopIsClosed == true)
+        {
+            isam->update();
+            isam->update();
+            isam->update();
+            isam->update();
+            isam->update();
+        }
+
+        gtSAMgraph.resize(0);
+        initialEstimate.clear();
+    }
+
     void saveKeyFramesAndFactor()
     {
         if (saveFrame() == false)
@@ -1900,22 +1919,8 @@ public:
         // gtSAMgraph.print("GTSAM Graph:\n");
 
         // update iSAM
-        isam->update(gtSAMgraph, initialEstimate);
-        isam->update();
-
-        if (aLoopIsClosed == true)
-        {
-            isam->update();
-            isam->update();
-            isam->update();
-            isam->update();
-            isam->update();
-        }
-
-        gtSAMgraph.resize(0);
-        initialEstimate.clear();
-
-        //save key poses
+        optimizeGraph();
+        
         PointType thisPose3D;
         PointTypePose thisPose6D;
         Pose3 latestEstimate;
@@ -2124,6 +2129,10 @@ public:
             obj_marker.scale.x = obj->Q().radii()(0);
             obj_marker.scale.y = obj->Q().radii()(1);
             obj_marker.scale.z = obj->Q().radii()(2);
+            
+            cout<<"CENT: "<<obj->Q().centroid().transpose()<<endl;
+            cout<<"QUAT: "<<obj->Q().pose().rotation()<<endl;
+            cout<<"RADII: "<<obj->Q().radii().transpose()<<endl;
             obj_markers.markers.push_back(obj_marker);
 
             visualization_msgs::Marker obj_name = obj_marker;
@@ -2137,6 +2146,7 @@ public:
             obj_marker.color.b = 255.0;
             obj_markers.markers.push_back(obj_name);
         }
+        cout<<"===="<<endl;
         pubObjects.publish(obj_markers);
     }
 

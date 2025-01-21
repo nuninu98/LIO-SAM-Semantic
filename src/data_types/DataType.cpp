@@ -48,15 +48,15 @@ namespace LIO_SAM_SEMANTIC{
     void Detection::calcInitQuadric(const cv::Mat& depth_scaled, const cv::Mat& mask, const Eigen::Matrix3d& K){
         cv::Mat depth_masked;
         depth_scaled.copyTo(depth_masked, mask);        
-        pcl::PointCloud<pcl::PointXYZ> cloud;
-        vector<pcl::PointXYZ> sort_pt;
+        pcl::PointCloud<pcl::PointXYZI> cloud;
+        vector<pcl::PointXYZI> sort_pt;
         for(int r = roi_.y; r < roi_.y+ roi_.height; ++r){
             for(int c = roi_.x; c < roi_.x + roi_.width; ++c){
                 float depth = depth_masked.at<float>(r, c);
                 if(isnanf(depth) || depth < 1.0e-4){
                     continue;
                 }
-                pcl::PointXYZ pt;
+                pcl::PointXYZI pt;
                 pt.x = (c - K(0, 2)) * depth / K(0, 0);
                 pt.y = (r - K(1, 2)) * depth / K(1, 1);
                 pt.z = depth;
@@ -65,7 +65,7 @@ namespace LIO_SAM_SEMANTIC{
             }
         }
         // std::cout<<"2222"<<std::endl;
-        sort(sort_pt.begin(), sort_pt.end(), [](const pcl::PointXYZ& p1, const pcl::PointXYZ& p2){
+        sort(sort_pt.begin(), sort_pt.end(), [](const pcl::PointXYZI& p1, const pcl::PointXYZI& p2){
             return p1.z < p2.z;
         });
         // std::cout<<"3333"<<std::endl;
@@ -80,7 +80,7 @@ namespace LIO_SAM_SEMANTIC{
         // std::cout<<"5555"<<std::endl;
         Eigen::Vector4f centroid;
         pcl::compute3DCentroid(cloud, centroid);
-        pcl::PointXYZ min_pt, max_pt;
+        pcl::PointXYZI min_pt, max_pt;
         pcl::getMinMax3D(cloud, min_pt, max_pt);
         // std::cout<<"6666"<<std::endl;
         Eigen::Vector3f center = (max_pt.getVector3fMap() + min_pt.getVector3fMap())/2.0;
@@ -106,9 +106,9 @@ namespace LIO_SAM_SEMANTIC{
         transform.translate(center);  
         transform.rotate(keep_Z_Rot);
          
-        pcl::PointCloud<pcl::PointXYZ> transformedCloud;
+        pcl::PointCloud<pcl::PointXYZI> transformedCloud;
         pcl::transformPointCloud(cloud, transformedCloud, transform.inverse());
-        pcl::PointXYZ min_pt_T, max_pt_T;
+        pcl::PointXYZI min_pt_T, max_pt_T;
         pcl::getMinMax3D(transformedCloud, min_pt_T, max_pt_T);
         Eigen::Vector3f center_new = (max_pt_T.getVector3fMap() + min_pt_T.getVector3fMap()) / 2;
         Eigen::Vector3f box_dim;

@@ -94,7 +94,8 @@ add_library(lio_sam_semantic_dtypelib
 src/data_types/DataType.cpp
 src/data_types/Object.cpp
 )
-target_link_libraries(lio_sam_semantic_dtypelib ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBRARIES})
+target_link_libraries(lio_sam_semantic_dtypelib 
+${catkin_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBRARIES} gtsam_quadrics)
 
 # Range Image Projection
 add_executable(${PROJECT_NAME}_imageProjection src/imageProjection.cpp)
