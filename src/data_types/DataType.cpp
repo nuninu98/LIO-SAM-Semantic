@@ -69,8 +69,9 @@ namespace LIO_SAM_SEMANTIC{
             return p1.z < p2.z;
         });
         // std::cout<<"3333"<<std::endl;
-        int max_ = sort_pt.size() * 0.95;
-        for(int i = 0; i < max_; ++i){
+        int max_ = sort_pt.size() * 0.9;
+        int min_ = sort_pt.size() * 0.1;
+        for(int i = min_; i < max_; ++i){
             cloud.push_back(sort_pt[i]);
         }
         if(cloud.size() < 10){
@@ -113,6 +114,7 @@ namespace LIO_SAM_SEMANTIC{
         Eigen::Vector3f center_new = (max_pt_T.getVector3fMap() + min_pt_T.getVector3fMap()) / 2;
         Eigen::Vector3f box_dim;
         box_dim = max_pt_T.getVector3fMap() - min_pt_T.getVector3fMap();
+        box_dim = box_dim.cwiseAbs();
         Eigen::Affine3f transform2 = Eigen::Affine3f::Identity();
         transform2.translate(center_new);
         Eigen::Affine3f transform3 = transform * transform2;

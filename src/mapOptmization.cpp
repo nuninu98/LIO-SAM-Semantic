@@ -87,6 +87,8 @@ private:
         
         LIO_SAM_SEMANTIC::DetectionGroup detection_groups;
         detection_groups.stamp = ros::Time::now().toSec();
+        pcl::PointCloud<pcl::PointXYZ> cloud, cloud_tf;
+        sensor_msgs::PointCloud2 depth_cloud;
         for(int i = 0; i < yolo_result->detections.detections.size(); ++i){
             auto detect = yolo_result->detections.detections[i];
             cv::Rect roi(cv::Point(detect.bbox.center.x- detect.bbox.size_x/2, detect.bbox.center.y - detect.bbox.size_y/2), cv::Size(detect.bbox.size_x, detect.bbox.size_y));
@@ -108,10 +110,34 @@ private:
             detection_groups.detections.push_back(det_p);
             detection_groups.view = image.clone();
             //==========Debug========
-            // cv::rectangle(image, det_p.getROI_CV(), cv::Scalar(0, 0, 255));
-            // cv::putText(image, det_p.getClassName(), det_p.getROI_CV().tl(), 1, 1, cv::Scalar(255, 255, 255));
+            if(detect.header.frame_id == "person"){
+                cv::Mat depth_masked;
+                depth_scaled.copyTo(depth_masked, mask);
+
+                
+                for(int r = 0; r < depth_mat.rows; ++r){
+                    for(int c = 0; c < depth_mat.cols; ++c){
+                        float depth = depth_masked.at<float>(r, c);
+                        if(isnan(depth) || depth < 1.0e-4){
+                            continue;
+                        }
+                        pcl::PointXYZ pt;
+                        pt.x = (c - K(0, 2)) * depth / K(0, 0);
+                        pt.y = (r - K(1, 2)) * depth / K(1, 1);
+                        pt.z = depth;
+                        cloud.push_back(pt);
+                    }
+                }
+                
+            }
             //=======================
         }
+        pcl::transformPointCloud(cloud, cloud_tf, Tlc_);
+                
+        pcl::toROSMsg(cloud_tf, depth_cloud);
+        depth_cloud.header.stamp = ros::Time::now();
+        depth_cloud.header.frame_id = "base_link";
+        pub_cloud_.publish(depth_cloud);
         
         det_lock_.lock();
         detection_buf_.push(detection_groups);
@@ -123,25 +149,7 @@ private:
         
         // //===========Debug scale=====
         
-        // pcl::PointCloud<pcl::PointXYZ> cloud;
-        // for(int r = 0; r < depth_mat.rows; ++r){
-        //     for(int c = 0; c < depth_mat.cols; ++c){
-        //         float depth = depth_scaled.at<float>(r, c);
-        //         if(isnan(depth) || depth < 1.0e-4){
-        //             continue;
-        //         }
-        //         pcl::PointXYZ pt;
-        //         pt.x = (c - K(0, 2)) * depth / K(0, 0);
-        //         pt.y = (r - K(1, 2)) * depth / K(1, 1);
-        //         pt.z = depth;
-        //         cloud.push_back(pt);
-        //     }
-        // }
-        // sensor_msgs::PointCloud2 depth_cloud;
-        // pcl::toROSMsg(cloud, depth_cloud);
-        // depth_cloud.header.stamp = ros::Time::now();
-        // depth_cloud.header.frame_id = "camera_link";
-        // pub_cloud_.publish(depth_cloud);
+        
         // //===========================
     }
 public:
