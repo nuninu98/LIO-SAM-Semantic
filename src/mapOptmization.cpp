@@ -57,7 +57,7 @@ class mapOptimization : public ParamServer
 {
 private:
     double depth_factor_ = 1.0;
-    ros::Publisher pub_cloud_;
+    ros::Publisher pub_cloud_, pub_quadric_;
     std::mutex object_lock_, det_lock_;
     queue<LIO_SAM_SEMANTIC::DetectionGroup> detection_buf_;
     Eigen::Matrix4d map2Base_ = Eigen::Matrix4d::Identity();
@@ -87,50 +87,81 @@ private:
         
         LIO_SAM_SEMANTIC::DetectionGroup detection_groups;
         detection_groups.stamp = ros::Time::now().toSec();
-        pcl::PointCloud<pcl::PointXYZ> cloud, cloud_tf;
+        pcl::PointCloud<pcl::PointXYZI> cloud, cloud_tf;
         sensor_msgs::PointCloud2 depth_cloud;
+        visualization_msgs::MarkerArray quadrics;
         for(int i = 0; i < yolo_result->detections.detections.size(); ++i){
             auto detect = yolo_result->detections.detections[i];
             cv::Rect roi(cv::Point(detect.bbox.center.x- detect.bbox.size_x/2, detect.bbox.center.y - detect.bbox.size_y/2), cv::Size(detect.bbox.size_x, detect.bbox.size_y));
             cv::Mat mask;
+            cv::Mat mask_erode;
             if(!yolo_result->masks.empty()){
                 sensor_msgs::ImageConstPtr mask_msg = boost::make_shared<sensor_msgs::Image const>(yolo_result->masks[i]);
                 cv_bridge::CvImageConstPtr mask_cv = cv_bridge::toCvShare(mask_msg, "mono8");
-                mask = mask_cv->image.clone();
+                mask = mask_cv->image.clone() > 60;
+                
+                cv::erode(mask, mask_erode, cv::Mat::ones(cv::Size(5,5),CV_8UC1),cv::Point(-1,-1),2);
             }
             else{
-                mask = cv::Mat::zeros(image.size(), CV_8U);
-                mask(roi) = 255;
+                mask_erode = cv::Mat::zeros(image.size(), CV_8U);
+                mask_erode(roi) = 255;
             }
-            if(detect.header.frame_id == "bench"){
+             LIO_SAM_SEMANTIC::Detection det_p(roi, detect.header.frame_id);
+            
+           
+            det_p.calcCloud(depth_scaled, mask, K);
+            if(det_p.cloud->empty()){
                 continue;
             }
-            LIO_SAM_SEMANTIC::Detection det_p(roi, cv::Mat(), detect.header.frame_id);
-            det_p.calcInitQuadric(depth_scaled, mask, K);
+            pcl::PointCloud<pcl::PointXYZI> quadric_cloud;
+            pcl::transformPointCloud(*det_p.cloud, quadric_cloud, Tlc_);
+            visualization_msgs::Marker Q;
+            Q.header.frame_id = "base_link";
+            Q.header.stamp = ros::Time::now();
+            Q.id = i;
+            Q.type = visualization_msgs::Marker::SPHERE;
+            auto dQ = LIO_SAM_SEMANTIC::calcQuadric(quadric_cloud);
+            Eigen::Matrix4d Q44 = dQ.matrix().inverse(); 
+            int inliers = 0;
+            for(int id = 0; id < quadric_cloud.size(); ++id){
+                Eigen::Vector4d pt_vec = Eigen::Vector4d::Ones();
+                pt_vec(0) = quadric_cloud[id].x;
+                pt_vec(1) = quadric_cloud[id].y;
+                pt_vec(2) = quadric_cloud[id].z;
+                double val = pt_vec.transpose() * Q44 * pt_vec;
+                if(val <= 0.0){
+                    inliers++;
+                }
+            }
+            double inlier_rate = double(inliers)/ double(quadric_cloud.size());
+            if(inlier_rate < 0.7){
+                continue;
+            }
+            //==========Debug========
+            cloud = cloud + *(det_p.cloud);
+                        
+            Q.color.a = inlier_rate;
+            Q.color.r = 255.0;
+            Q.color.g = 0.0;
+            Q.color.b = 255.0;
+
+            Q.scale.x = 2.0 * dQ.radii()(0);
+            Q.scale.y = 2.0 * dQ.radii()(1);
+            Q.scale.z = 2.0 * dQ.radii()(2);
+            
+            Q.pose.position.x = dQ.pose().translation().x();
+            Q.pose.position.y = dQ.pose().translation().y();
+            Q.pose.position.z = dQ.pose().translation().z();
+
+            Q.pose.orientation.w = dQ.pose().rotation().quaternion().w();
+            Q.pose.orientation.x = dQ.pose().rotation().quaternion().x();
+            Q.pose.orientation.y = dQ.pose().rotation().quaternion().y();
+            Q.pose.orientation.z = dQ.pose().rotation().quaternion().z();
+            Q.lifetime = ros::Duration(0.05);
+            quadrics.markers.push_back(Q);
+            //=======================
             detection_groups.detections.push_back(det_p);
             detection_groups.view = image.clone();
-            //==========Debug========
-            if(detect.header.frame_id == "person"){
-                cv::Mat depth_masked;
-                depth_scaled.copyTo(depth_masked, mask);
-
-                
-                for(int r = 0; r < depth_mat.rows; ++r){
-                    for(int c = 0; c < depth_mat.cols; ++c){
-                        float depth = depth_masked.at<float>(r, c);
-                        if(isnan(depth) || depth < 1.0e-4){
-                            continue;
-                        }
-                        pcl::PointXYZ pt;
-                        pt.x = (c - K(0, 2)) * depth / K(0, 0);
-                        pt.y = (r - K(1, 2)) * depth / K(1, 1);
-                        pt.z = depth;
-                        cloud.push_back(pt);
-                    }
-                }
-                
-            }
-            //=======================
         }
         pcl::transformPointCloud(cloud, cloud_tf, Tlc_);
                 
@@ -138,19 +169,13 @@ private:
         depth_cloud.header.stamp = ros::Time::now();
         depth_cloud.header.frame_id = "base_link";
         pub_cloud_.publish(depth_cloud);
-        
+        pub_quadric_.publish(quadrics);
         det_lock_.lock();
         detection_buf_.push(detection_groups);
         if(detection_buf_.size() > 10){
             detection_buf_.pop();
         }
         det_lock_.unlock();
-
-        
-        // //===========Debug scale=====
-        
-        
-        // //===========================
     }
 public:
 
@@ -194,6 +219,8 @@ public:
 
     vector<pcl::PointCloud<PointType>::Ptr> cornerCloudKeyFrames;
     vector<pcl::PointCloud<PointType>::Ptr> surfCloudKeyFrames;
+
+    vector<LIO_SAM_SEMANTIC::DetectionGroup> keyframeDetections;
     
     pcl::PointCloud<PointType>::Ptr cloudKeyPoses3D;
     pcl::PointCloud<PointTypePose>::Ptr cloudKeyPoses6D;
@@ -234,6 +261,8 @@ public:
     pcl::VoxelGrid<PointType> downSizeFilterSurf;
     pcl::VoxelGrid<PointType> downSizeFilterICP;
     pcl::VoxelGrid<PointType> downSizeFilterSurroundingKeyPoses; // for surrounding key poses of scan-to-map optimization
+
+    pcl::VoxelGrid<PointType> downSizeFilterSemantic;
     
     ros::Time timeLaserInfoStamp;
     double timeLaserInfoCur;
@@ -299,11 +328,13 @@ public:
 
         pubSLAMInfo           = nh.advertise<lio_sam::cloud_info>("lio_sam/mapping/slam_info", 1);
 
+        pub_quadric_ = nh.advertise<visualization_msgs::MarkerArray>("quadrics", 1);
+
         downSizeFilterCorner.setLeafSize(mappingCornerLeafSize, mappingCornerLeafSize, mappingCornerLeafSize);
         downSizeFilterSurf.setLeafSize(mappingSurfLeafSize, mappingSurfLeafSize, mappingSurfLeafSize);
         downSizeFilterICP.setLeafSize(mappingSurfLeafSize, mappingSurfLeafSize, mappingSurfLeafSize);
         downSizeFilterSurroundingKeyPoses.setLeafSize(surroundingKeyframeDensity, surroundingKeyframeDensity, surroundingKeyframeDensity); // for surrounding key poses of scan-to-map optimization
-
+        downSizeFilterSemantic.setLeafSize(0.1, 0.1, 0.1);
         pub_cloud_ = nh.advertise<sensor_msgs::PointCloud2>("depth_cloud", 1);
         pubObjects = nh.advertise<visualization_msgs::MarkerArray>("objects", 1);
 
@@ -443,6 +474,7 @@ public:
         return pcl::getTransformation(thisPoint.x, thisPoint.y, thisPoint.z, thisPoint.roll, thisPoint.pitch, thisPoint.yaw);
     }
 
+    
     Eigen::Affine3f trans2Affine3f(float transformIn[])
     {
         return pcl::getTransformation(transformIn[3], transformIn[4], transformIn[5], transformIn[0], transformIn[1], transformIn[2]);
@@ -536,7 +568,39 @@ public:
 
         cout << "****************************************************" << endl;
         cout << "Saving map to pcd files completed\n" << endl;
-        if(!objects_.empty()){
+        
+        unordered_map<string, vector<pcl::PointCloud<pcl::PointXYZI>>> map_objects;
+        
+        for(int i = 0; i < keyframeDetections.size(); ++i){
+            Eigen::Matrix4d Tml = pclPointTogtsamPose3(cloudKeyPoses6D->points[i]).matrix();
+            Eigen::Matrix4d Tmc = Tml * Tlc_;
+            for(auto& det : keyframeDetections[i].detections){
+                string name = det.getClassName();
+                if(map_objects.find(name) == map_objects.end()){
+                    map_objects.insert({name, vector<pcl::PointCloud<pcl::PointXYZI>>()});
+                }
+                pcl::PointCloud<pcl::PointXYZI> det_cloud_tf;
+                pcl::transformPointCloud(*det.cloud, det_cloud_tf, Tmc);
+                bool matched = false;
+                for(auto& obj_cloud : map_objects[name]){
+                    gtsam_quadrics::ConstrainedDualQuadric oQ = LIO_SAM_SEMANTIC::calcQuadric(obj_cloud);
+                    gtsam_quadrics::ConstrainedDualQuadric dQ = LIO_SAM_SEMANTIC::calcQuadric(det_cloud_tf);
+                    if(LIO_SAM_SEMANTIC::intersects(dQ, oQ)){
+                        obj_cloud = obj_cloud + det_cloud_tf;
+                        pcl::PointCloud<pcl::PointXYZI>::Ptr obj_cloud_ptr(new pcl::PointCloud<pcl::PointXYZI>(obj_cloud));
+                        downSizeFilterSemantic.setInputCloud(obj_cloud_ptr);
+                        downSizeFilterSemantic.filter(obj_cloud);
+                        matched = true;
+                        break;
+                    }
+                }
+                if(!matched){
+                    map_objects[name].push_back(det_cloud_tf);
+                }
+            }
+        }
+
+        if(!map_objects.empty()){
             ofstream sem_map(saveMapDirectory + "/objects.txt");
             for(int i = 0; i < objects_.size(); ++i){
                 string name = objects_[i]->getClassName();
@@ -549,6 +613,69 @@ public:
                 <<rot.x()<<" "<<rot.y()<<" "<<rot.z()<<" "<<radii(0)<<" "<<radii(1)<<" "<<radii(2)<<endl;
             }
         }
+
+        visualization_msgs::MarkerArray obj_markers;
+        size_t id = 0;
+        if(!map_objects.empty()){
+            ofstream sem_map(saveMapDirectory + "/objects.txt");
+            for(const auto& obj : map_objects){
+                for(const auto& obj_cloud : obj.second){
+                    visualization_msgs::Marker obj_marker;
+                    obj_marker.type = visualization_msgs::Marker::SPHERE;
+                    obj_marker.id = id;
+                    id++;
+                    obj_marker.header.stamp = ros::Time::now();
+                    obj_marker.header.frame_id =odometryFrame;
+                
+                    obj_marker.color.a = 0.6;
+                    obj_marker.color.r = 0.0;
+                    obj_marker.color.g = 255.0;
+                    obj_marker.color.b = 0.0;
+
+                    gtsam_quadrics::ConstrainedDualQuadric obj_Q = LIO_SAM_SEMANTIC::calcQuadric(obj_cloud);
+                    gtsam::Vector3 radii = obj_Q.radii();
+                    gtsam::Pose3 pose = obj_Q.pose();
+
+                    obj_marker.pose.position.x = obj_Q.centroid().x();
+                    obj_marker.pose.position.y = obj_Q.centroid().y();
+                    obj_marker.pose.position.z = obj_Q.centroid().z();
+                    obj_marker.pose.orientation.w = pose.rotation().toQuaternion().w();
+                    obj_marker.pose.orientation.x = pose.rotation().toQuaternion().x();
+                    obj_marker.pose.orientation.y = pose.rotation().toQuaternion().y();
+                    obj_marker.pose.orientation.z = pose.rotation().toQuaternion().z();
+                    obj_marker.scale.x = 2.0 *radii(0);
+                    obj_marker.scale.y = 2.0 *radii(1);
+                    obj_marker.scale.z = 2.0 *radii(2);
+
+                    
+                    // cout<<"CENT: "<<obj->Q().centroid().transpose()<<endl;
+                    // cout<<"QUAT: "<<obj->Q().pose().rotation()<<endl;
+                    // cout<<"RADII: "<<obj->Q().radii().transpose()<<endl;
+                    obj_markers.markers.push_back(obj_marker);
+
+                    visualization_msgs::Marker obj_name = obj_marker;
+                    obj_name.type = visualization_msgs::Marker::TEXT_VIEW_FACING;
+                    obj_name.text = obj.first;
+                    obj_name.id = id;
+                    id++;
+                    obj_marker.color.a = 1.0;
+                    obj_marker.color.r = 255.0;
+                    obj_marker.color.g = 255.0;
+                    obj_marker.color.b = 255.0;
+                    obj_markers.markers.push_back(obj_name);
+
+                    
+                    
+                    gtsam::Point3 trans = pose.translation();
+                    gtsam::Vector rot = pose.rotation().quaternion();
+
+                    sem_map << obj.first<<" "<<trans(0)<<" "<<trans(1)<<" "<<trans(2)<<" "<<rot.w()<<" "
+                    <<rot.x()<<" "<<rot.y()<<" "<<rot.z()<<" "<<radii(0)<<" "<<radii(1)<<" "<<radii(2)<<endl;
+                }
+                
+            }
+        }
+        pubObjects.publish(obj_markers);
 
         return true;
     }
@@ -1633,12 +1760,8 @@ public:
         loopNoiseQueue.clear();
         aLoopIsClosed = true;
     }
-    void addSemanticFactor(){ // after odom factor
-        
-        int boundary_thresh = 10;
-        int img_width = 640;
-        int img_height = 480; 
-        cv::Rect screen(0, 0, img_width, img_height);
+
+    void addSemanticDetections(){
         LIO_SAM_SEMANTIC::DetectionGroup dg;
         det_lock_.lock();
         while(!detection_buf_.empty()){
@@ -1657,238 +1780,264 @@ public:
             detection_buf_.pop();
         }
         det_lock_.unlock();
-        gtsam::Pose3 Tlc(Tlc_);
-        gtsam::Pose3 Twl = trans2gtsamPose(transformTobeMapped);
-        gtsam::Pose3 Twc = Twl * Tlc;
-        gtsam_quadrics::QuadricCamera quadric_cam;
-        size_t key_id = X(cloudKeyPoses3D-> empty() ? 0 : cloudKeyPoses3D->size());
-        size_t sensor_id = C(cloudKeyPoses3D-> empty() ? 0 : cloudKeyPoses3D->size());
-        gtsam::Cal3_S2::shared_ptr K_gtsam(new gtsam::Cal3_S2(K_(0, 0), K_(1, 1), 0.0, K_(0, 2), K_(1, 2)));
-        unordered_map<int, pair<LIO_SAM_SEMANTIC::Object*, double>> matches;
-
-        Vector4 bbox_noise_vec(50.0, 50.0, 50.0, 50.0);
-            // if(max_iou > 1.0e-5){
-            //     bbox_noise_vec = bbox_noise_vec * (1.0 / max_iou);
-            // }
-        auto bbox_noise = gtsam::noiseModel::Diagonal::Sigmas(bbox_noise_vec);
-        if(!initialEstimate.exists(sensor_id)){
-            initialEstimate.insert(sensor_id, Twc);
-            noiseModel::Diagonal::shared_ptr mountNoise = noiseModel::Diagonal::Variances((Vector(6) << 1e-5, 1e-5, 1e-5, 1e-5, 1e-5, 1e-5).finished());
-            BetweenFactor<Pose3>mount(key_id, sensor_id, Tlc, mountNoise);
-            gtSAMgraph.add(mount);
-        }
-
-        for(int i = 0; i < objects_.size(); ++i){
-            gtsam_quadrics::ConstrainedDualQuadric Q_obj = objects_[i]->Q(); 
-            if(Q_obj.contains(Twc) || Q_obj.isBehind(Twc)){
-                continue;
-            }
-            double max_iou = 0.0;
-            int max_iou_det = -1;
-
-            gtsam_quadrics::AlignedBox2 est = quadric_cam.project(Q_obj, Twc, K_gtsam).bounds();
-            cv::Rect est_cv(est.xmin(), est.ymin(), est.width(), est.height());
-            cv::Rect inter = est_cv & screen;
-            est = gtsam_quadrics::AlignedBox2(inter.x, inter.y, inter.x + inter.width, inter.y+ inter.height);
-
-            for(int j = 0; j < dg.detections.size(); ++j){
-                if(objects_[i]->getClassName() != dg.detections[j].getClassName()){
-                    continue;
-                }
-                // if(dg.detections[j].getROI().xmin() < boundary_thresh || dg.detections[j].getROI().xmax() > img_width - boundary_thresh || dg.detections[j].getROI().ymin() < boundary_thresh || dg.detections[j].getROI().ymax() > img_height - boundary_thresh){
-                //     continue;
-                // }
-                double iou = dg.detections[j].getROI().iou(est);
-                if(iou > max_iou){
-                    max_iou = iou;
-                    max_iou_det = j;
-                }
-            }
-            if(max_iou > 0.2){
-                if(matches.find(max_iou_det) == matches.end()){
-                    matches.insert({max_iou_det, {objects_[i], max_iou}});
-                }
-                else if(matches[max_iou_det].second< max_iou){
-                    matches[max_iou_det] = {objects_[i], max_iou};
-                }
-            }
-            else if(max_iou_det != -1){
-                gtsam::Point3 q_center =  Twc.transformFrom(dg.detections[max_iou_det].Q().centroid());
-                double d1 = (q_center - objects_[i]->Q().centroid()).norm();
-                double d2 = max(dg.detections[max_iou_det].Q().radii().norm(), objects_[i]->Q().radii().norm());
-                if(d1 < d2){
-                    if(matches.find(max_iou_det) == matches.end()){
-                        matches.insert({max_iou_det, {objects_[i], max_iou}});
-                    }
-                    else if(matches[max_iou_det].second< max_iou){
-                        matches[max_iou_det] = {objects_[i], max_iou};
-                    }
-                }
-            }
-        }
-        for(const auto& corr: matches){
-            if(dg.detections[corr.first].getROI().xmin() < boundary_thresh || dg.detections[corr.first].getROI().xmax() > img_width - boundary_thresh || dg.detections[corr.first].getROI().ymin() < boundary_thresh || dg.detections[corr.first].getROI().ymax() > img_height - boundary_thresh){
-                continue;
-            }
-            gtsam_quadrics::BoundingBoxFactor bbf(dg.detections[corr.first].getROI(), K_gtsam, sensor_id, O(corr.second.first->id()), bbox_noise, gtsam_quadrics::BoundingBoxFactor::STANDARD);
-            gtSAMgraph.add(bbf);
-        }
-        for(int i = 0; i < dg.detections.size(); ++i){ // registerObjects
-            if(matches.find(i) != matches.end()){
-                continue;
-            }
-            LIO_SAM_SEMANTIC::Detection det = dg.detections[i];
-            gtsam_quadrics::ConstrainedDualQuadric dQc = det.Q();
-            gtsam::Pose3 dQc_pose = dQc.pose();
-            if(dQc_pose.z() < 0){
-                continue;
-            }
-            if(det.Q().radii().norm() < 1.0e-3){
-                continue;
-            }
-            
-            gtsam::Pose3 dQw_pose = Twc.transformPoseFrom(dQc_pose);
-            gtsam_quadrics::ConstrainedDualQuadric Q(dQw_pose, dQc.radii());
-            gtsam_quadrics::AlignedBox2 est_box = quadric_cam.project(Q, Twc, K_gtsam).bounds();
-            if(est_box.iou(det.getROI()) < 0.15){
-                continue;
-            }
-            //std::shared_ptr<LIO_SAM_SEMANTIC::Object> new_obj(new LIO_SAM_SEMANTIC::Object(det.getClassName(), objects_.size(), Q));
-            LIO_SAM_SEMANTIC::Object* new_obj = new LIO_SAM_SEMANTIC::Object(det.getClassName(), last_oid_ + 1, Q);
-            Eigen::VectorXd opf_noise_vec = Eigen::VectorXd::Ones(9);
-            auto init_obj_noise = gtsam::noiseModel::Diagonal::Sigmas(opf_noise_vec);
-            gtsam::PriorFactor<gtsam_quadrics::ConstrainedDualQuadric> opf(O(new_obj->id()), Q, init_obj_noise);
-            initialEstimate.insert(O(new_obj->id()), Q);
-            gtSAMgraph.add(opf);
-            gtsam_quadrics::BoundingBoxFactor bbf(det.getROI(), K_gtsam, sensor_id, O(new_obj->id()), bbox_noise, gtsam_quadrics::BoundingBoxFactor::TRUNCATED);
-            gtSAMgraph.add(bbf);
-            objects_.push_back(new_obj);
-            last_oid_++;
-        }
-        // for(const auto& det : dg.detections){
-        //     gtsam::Cal3_S2::shared_ptr K_gtsam(new gtsam::Cal3_S2(K_(0, 0), K_(1, 1), 0.0, K_(0, 2), K_(1, 2))); 
-        //     if(!initialEstimate.exists(sensor_id)){
-        //         initialEstimate.insert(sensor_id, Twc);
-        //         noiseModel::Diagonal::shared_ptr mountNoise = noiseModel::Diagonal::Variances((Vector(6) << 1e-5, 1e-5, 1e-5, 1e-5, 1e-5, 1e-5).finished());
-        //         BetweenFactor<Pose3>mount(key_id, sensor_id, Tlc, mountNoise);
-        //         gtSAMgraph.add(mount);
-        //     }
-        //     double max_iou = 0.0;
-        //     LIO_SAM_SEMANTIC::Object* matched_obj = nullptr;
-        //     gtsam_quadrics::AlignedBox2 meas = det.getROI();
-        //     for(int i = 0; i < objects_.size(); ++i){
-        //         gtsam_quadrics::ConstrainedDualQuadric Q_obj = objects_[i]->Q(); 
-        //         if(Q_obj.contains(Twc) || Q_obj.isBehind(Twc)){
-        //             continue;
-        //         }
-        //         gtsam_quadrics::AlignedBox2 est = quadric_cam.project(Q_obj, Twc, K_gtsam).bounds();
-        //         cv::Rect est_cv(est.xmin(), est.ymin(), est.width(), est.height());
-        //         cv::Rect inter = est_cv & screen;
-        //         est = gtsam_quadrics::AlignedBox2(inter.x, inter.y, inter.x + inter.width, inter.y+ inter.height);
-        //         double iou = meas.iou(est);
-        //         if(iou > max_iou){
-        //             matched_obj = objects_[i];
-        //             //matched_obj = objects_[i].get();
-        //             max_iou = iou;
-        //         }
-        //     }
-        //     bool matched = false;
-        //     if(matched_obj == nullptr){
-        //         matched = false;
-        //     }
-        //     else{
-        //         matched = max_iou > 0.2;
-        //         if(!matched){
-        //             gtsam::Point3 q_center =  Twc.transformFrom(det.Q().centroid());
-        //             if((q_center - matched_obj->Q().centroid()).norm() < max(det.Q().radii().norm(), matched_obj->Q().radii().norm())){
-        //                 matched = true;
-        //             }
-        //         }
-        //     }
-        //     Vector4 bbox_noise_vec(50.0, 50.0, 50.0, 50.0);
-        //     // if(max_iou > 1.0e-5){
-        //     //     bbox_noise_vec = bbox_noise_vec * (1.0 / max_iou);
-        //     // }
-        //     auto bbox_noise = gtsam::noiseModel::Diagonal::Sigmas(bbox_noise_vec);
-        //     if(matched){
-        //         if(meas.xmin() < boundary_thresh || meas.xmax() > img_width - boundary_thresh || meas.ymin() < boundary_thresh || meas.ymax() > img_height - boundary_thresh){
-        //             continue;
-        //         }
-        //         cout<<"MATCHED"<<endl;
-        //         gtsam_quadrics::BoundingBoxFactor bbf(det.getROI(), K_gtsam, sensor_id, O(matched_obj->id()), bbox_noise, gtsam_quadrics::BoundingBoxFactor::STANDARD);
-        //         gtSAMgraph.add(bbf);
-        //         matches.insert({&det, matched_obj});
-        //     }
-        //     else{ // registerObject
-        //         gtsam_quadrics::ConstrainedDualQuadric dQc = det.Q();
-        //         gtsam::Pose3 dQc_pose = dQc.pose();
-
-        //         if(dQc_pose.z() < 0){
-        //             continue;
-        //         }
-        //         if(det.Q().radii().norm() < 1.0e-3){
-        //             continue;
-        //         }
-        //         gtsam::Pose3 dQw_pose = Twc.transformPoseFrom(dQc_pose);
-        //         gtsam_quadrics::ConstrainedDualQuadric Q(dQw_pose, dQc.radii());
-        //         gtsam_quadrics::AlignedBox2 est_box = quadric_cam.project(Q, Twc, K_gtsam).bounds();
-        //         if(est_box.iou(det.getROI()) < 0.15){
-        //             cout<<"CC"<<endl;
-        //             continue;
-        //         }
-        //         //std::shared_ptr<LIO_SAM_SEMANTIC::Object> new_obj(new LIO_SAM_SEMANTIC::Object(det.getClassName(), objects_.size(), Q));
-        //         LIO_SAM_SEMANTIC::Object* new_obj = new LIO_SAM_SEMANTIC::Object(det.getClassName(), objects_.size(), Q);
-        //         Eigen::VectorXd opf_noise_vec = Eigen::VectorXd::Ones(9);
-        //         auto init_obj_noise = gtsam::noiseModel::Diagonal::Sigmas(opf_noise_vec);
-        //         gtsam::PriorFactor<gtsam_quadrics::ConstrainedDualQuadric> opf(O(new_obj->id()), Q, init_obj_noise);
-        //         initialEstimate.insert(O(new_obj->id()), Q);
-        //         gtSAMgraph.add(opf);
-        //         gtsam_quadrics::BoundingBoxFactor bbf(det.getROI(), K_gtsam, sensor_id, O(new_obj->id()), bbox_noise, gtsam_quadrics::BoundingBoxFactor::TRUNCATED);
-        //         gtSAMgraph.add(bbf);
-        //         objects_.push_back(new_obj);
-        //     } 
-        // }
-
-        //=========Debug==================
-        if(!matches.empty()){
-            cv::Mat dg_view = dg.view.clone();
-            int cnt = 0;
-            gtsam_quadrics::QuadricCamera qcam;
-            gtsam::Cal3_S2::shared_ptr K_gtsam(new gtsam::Cal3_S2(K_(0, 0), K_(1, 1), 0.0, K_(0, 2), K_(1, 2))); 
-            for(auto& corr : matches){
-                cv::rectangle(dg_view, dg.detections[corr.first].getROI_CV(), cv::Scalar(0, 0, 255));
-                cv::putText(dg_view, to_string(cnt), dg.detections[corr.first].getROI_CV().tl(), 1, 1, cv::Scalar(0, 0, 255));
-                
-                gtsam_quadrics::ConstrainedDualQuadric Q = corr.second.first->Q();
-                gtsam_quadrics::AlignedBox2 bbox_est = qcam.project(Q, Twc, K_gtsam).bounds(); 
-                cv::Rect bbox_cv(bbox_est.xmin(), bbox_est.ymin(), bbox_est.width(), bbox_est.height());
-                cv::rectangle(dg_view, bbox_cv, cv::Scalar(255, 0, 0));
-                cv::putText(dg_view, to_string(cnt), bbox_cv.tl(), 1, 1, cv::Scalar(255, 0, 0));
-                cnt++;
-            }
-            // for(const auto& det : dg.detections){
-            //     cv::rectangle(dg_view, det.getROI_CV(), cv::Scalar(0, 0, 255));
-            //     cv::putText(dg_view, det.getClassName(), det.getROI_CV().tl(), 1, 1, cv::Scalar(255, 255, 255));
-            // }
-
-            // gtsam_quadrics::QuadricCamera qcam;
-            // gtsam::Cal3_S2::shared_ptr K_gtsam(new gtsam::Cal3_S2(K_(0, 0), K_(1, 1), 0.0, K_(0, 2), K_(1, 2))); 
-            // for(int i = 0; i < objects_.size(); ++i){
-            //     gtsam_quadrics::ConstrainedDualQuadric Q = objects_[i]->Q();
-            //     if(Q.isBehind(Twc) || Q.contains(Twc)){
-            //         continue;
-            //     }
-            //     gtsam_quadrics::AlignedBox2 bbox_est = qcam.project(Q, Twc, K_gtsam).bounds(); 
-            //     cv::Rect bbox_cv(bbox_est.xmin(), bbox_est.ymin(), bbox_est.width(), bbox_est.height());
-            //     cv::rectangle(dg_view, bbox_cv, cv::Scalar(255, 0, 0));
-            // }
-            if(!dg_view.empty()){
-                cv::imwrite("/home/nuninu98/test.png", dg_view);
-                cv::waitKey(1);
-            }
-        }
-        //================================
+        keyframeDetections.push_back(dg);
     }
+    // void addSemanticFactor(){ // after odom factor
+        
+    //     int boundary_thresh = 10;
+    //     int img_width = 640;
+    //     int img_height = 480; 
+    //     cv::Rect screen(0, 0, img_width, img_height);
+    //     LIO_SAM_SEMANTIC::DetectionGroup dg;
+    //     det_lock_.lock();
+    //     while(!detection_buf_.empty()){
+    //         double obj_stamp = detection_buf_.front().stamp;
+    //         if(obj_stamp > timeLaserInfoCur){
+    //             break;
+    //         }
+    //         if(timeLaserInfoCur - obj_stamp < 0.1){
+    //             if(dg.stamp < 0.0){
+    //                 dg = detection_buf_.front();
+    //             }
+    //             else if(dg.stamp < obj_stamp){
+    //                 dg = detection_buf_.front();
+    //             }
+    //         }
+    //         detection_buf_.pop();
+    //     }
+    //     det_lock_.unlock();
+    //     gtsam::Pose3 Tlc(Tlc_);
+    //     gtsam::Pose3 Twl = trans2gtsamPose(transformTobeMapped);
+    //     gtsam::Pose3 Twc = Twl * Tlc;
+    //     gtsam_quadrics::QuadricCamera quadric_cam;
+    //     size_t key_id = X(cloudKeyPoses3D-> empty() ? 0 : cloudKeyPoses3D->size());
+    //     size_t sensor_id = C(cloudKeyPoses3D-> empty() ? 0 : cloudKeyPoses3D->size());
+    //     gtsam::Cal3_S2::shared_ptr K_gtsam(new gtsam::Cal3_S2(K_(0, 0), K_(1, 1), 0.0, K_(0, 2), K_(1, 2)));
+    //     unordered_map<int, pair<LIO_SAM_SEMANTIC::Object*, double>> matches;
+
+    //     Vector4 bbox_noise_vec(50.0, 50.0, 50.0, 50.0);
+    //         // if(max_iou > 1.0e-5){
+    //         //     bbox_noise_vec = bbox_noise_vec * (1.0 / max_iou);
+    //         // }
+    //     auto bbox_noise = gtsam::noiseModel::Diagonal::Sigmas(bbox_noise_vec);
+    //     if(!initialEstimate.exists(sensor_id)){
+    //         initialEstimate.insert(sensor_id, Twc);
+    //         noiseModel::Diagonal::shared_ptr mountNoise = noiseModel::Diagonal::Variances((Vector(6) << 1e-5, 1e-5, 1e-5, 1e-5, 1e-5, 1e-5).finished());
+    //         BetweenFactor<Pose3>mount(key_id, sensor_id, Tlc, mountNoise);
+    //         gtSAMgraph.add(mount);
+    //     }
+
+    //     for(int i = 0; i < objects_.size(); ++i){
+    //         gtsam_quadrics::ConstrainedDualQuadric Q_obj = objects_[i]->Q(); 
+    //         if(Q_obj.contains(Twc) || Q_obj.isBehind(Twc)){
+    //             continue;
+    //         }
+    //         double max_iou = 0.0;
+    //         int max_iou_det = -1;
+
+    //         gtsam_quadrics::AlignedBox2 est = quadric_cam.project(Q_obj, Twc, K_gtsam).bounds();
+    //         cv::Rect est_cv(est.xmin(), est.ymin(), est.width(), est.height());
+    //         cv::Rect inter = est_cv & screen;
+    //         est = gtsam_quadrics::AlignedBox2(inter.x, inter.y, inter.x + inter.width, inter.y+ inter.height);
+
+    //         for(int j = 0; j < dg.detections.size(); ++j){
+    //             if(objects_[i]->getClassName() != dg.detections[j].getClassName()){
+    //                 continue;
+    //             }
+    //             // if(dg.detections[j].getROI().xmin() < boundary_thresh || dg.detections[j].getROI().xmax() > img_width - boundary_thresh || dg.detections[j].getROI().ymin() < boundary_thresh || dg.detections[j].getROI().ymax() > img_height - boundary_thresh){
+    //             //     continue;
+    //             // }
+    //             double iou = dg.detections[j].getROI().iou(est);
+    //             if(iou > max_iou){
+    //                 max_iou = iou;
+    //                 max_iou_det = j;
+    //             }
+    //         }
+    //         if(max_iou > 0.2){
+    //             if(matches.find(max_iou_det) == matches.end()){
+    //                 matches.insert({max_iou_det, {objects_[i], max_iou}});
+    //             }
+    //             else if(matches[max_iou_det].second< max_iou){
+    //                 matches[max_iou_det] = {objects_[i], max_iou};
+    //             }
+    //         }
+    //         else if(max_iou_det != -1){
+    //             gtsam::Point3 q_center =  Twc.transformFrom(dg.detections[max_iou_det].Q().centroid());
+    //             double d1 = (q_center - objects_[i]->Q().centroid()).norm();
+    //             double d2 = max(dg.detections[max_iou_det].Q().radii().norm(), objects_[i]->Q().radii().norm());
+    //             if(d1 < d2){
+    //                 if(matches.find(max_iou_det) == matches.end()){
+    //                     matches.insert({max_iou_det, {objects_[i], max_iou}});
+    //                 }
+    //                 else if(matches[max_iou_det].second< max_iou){
+    //                     matches[max_iou_det] = {objects_[i], max_iou};
+    //                 }
+    //             }
+    //         }
+    //     }
+    //     for(const auto& corr: matches){
+    //         if(dg.detections[corr.first].getROI().xmin() < boundary_thresh || dg.detections[corr.first].getROI().xmax() > img_width - boundary_thresh || dg.detections[corr.first].getROI().ymin() < boundary_thresh || dg.detections[corr.first].getROI().ymax() > img_height - boundary_thresh){
+    //             continue;
+    //         }
+    //         gtsam_quadrics::BoundingBoxFactor bbf(dg.detections[corr.first].getROI(), K_gtsam, sensor_id, O(corr.second.first->id()), bbox_noise, gtsam_quadrics::BoundingBoxFactor::STANDARD);
+    //         gtSAMgraph.add(bbf);
+    //     }
+    //     for(int i = 0; i < dg.detections.size(); ++i){ // registerObjects
+    //         if(matches.find(i) != matches.end()){
+    //             continue;
+    //         }
+    //         LIO_SAM_SEMANTIC::Detection det = dg.detections[i];
+    //         gtsam_quadrics::ConstrainedDualQuadric dQc = det.Q();
+    //         gtsam::Pose3 dQc_pose = dQc.pose();
+    //         if(dQc_pose.z() < 0){
+    //             continue;
+    //         }
+    //         if(det.Q().radii().norm() < 1.0e-3){
+    //             continue;
+    //         }
+            
+    //         gtsam::Pose3 dQw_pose = Twc.transformPoseFrom(dQc_pose);
+    //         gtsam_quadrics::ConstrainedDualQuadric Q(dQw_pose, dQc.radii());
+    //         gtsam_quadrics::AlignedBox2 est_box = quadric_cam.project(Q, Twc, K_gtsam).bounds();
+    //         if(est_box.iou(det.getROI()) < 0.15){
+    //             continue;
+    //         }
+    //         //std::shared_ptr<LIO_SAM_SEMANTIC::Object> new_obj(new LIO_SAM_SEMANTIC::Object(det.getClassName(), objects_.size(), Q));
+    //         LIO_SAM_SEMANTIC::Object* new_obj = new LIO_SAM_SEMANTIC::Object(det.getClassName(), last_oid_ + 1, Q);
+    //         Eigen::VectorXd opf_noise_vec = Eigen::VectorXd::Ones(9);
+    //         auto init_obj_noise = gtsam::noiseModel::Diagonal::Sigmas(opf_noise_vec);
+    //         gtsam::PriorFactor<gtsam_quadrics::ConstrainedDualQuadric> opf(O(new_obj->id()), Q, init_obj_noise);
+    //         initialEstimate.insert(O(new_obj->id()), Q);
+    //         gtSAMgraph.add(opf);
+    //         gtsam_quadrics::BoundingBoxFactor bbf(det.getROI(), K_gtsam, sensor_id, O(new_obj->id()), bbox_noise, gtsam_quadrics::BoundingBoxFactor::TRUNCATED);
+    //         gtSAMgraph.add(bbf);
+    //         objects_.push_back(new_obj);
+    //         last_oid_++;
+    //     }
+    //     // for(const auto& det : dg.detections){
+    //     //     gtsam::Cal3_S2::shared_ptr K_gtsam(new gtsam::Cal3_S2(K_(0, 0), K_(1, 1), 0.0, K_(0, 2), K_(1, 2))); 
+    //     //     if(!initialEstimate.exists(sensor_id)){
+    //     //         initialEstimate.insert(sensor_id, Twc);
+    //     //         noiseModel::Diagonal::shared_ptr mountNoise = noiseModel::Diagonal::Variances((Vector(6) << 1e-5, 1e-5, 1e-5, 1e-5, 1e-5, 1e-5).finished());
+    //     //         BetweenFactor<Pose3>mount(key_id, sensor_id, Tlc, mountNoise);
+    //     //         gtSAMgraph.add(mount);
+    //     //     }
+    //     //     double max_iou = 0.0;
+    //     //     LIO_SAM_SEMANTIC::Object* matched_obj = nullptr;
+    //     //     gtsam_quadrics::AlignedBox2 meas = det.getROI();
+    //     //     for(int i = 0; i < objects_.size(); ++i){
+    //     //         gtsam_quadrics::ConstrainedDualQuadric Q_obj = objects_[i]->Q(); 
+    //     //         if(Q_obj.contains(Twc) || Q_obj.isBehind(Twc)){
+    //     //             continue;
+    //     //         }
+    //     //         gtsam_quadrics::AlignedBox2 est = quadric_cam.project(Q_obj, Twc, K_gtsam).bounds();
+    //     //         cv::Rect est_cv(est.xmin(), est.ymin(), est.width(), est.height());
+    //     //         cv::Rect inter = est_cv & screen;
+    //     //         est = gtsam_quadrics::AlignedBox2(inter.x, inter.y, inter.x + inter.width, inter.y+ inter.height);
+    //     //         double iou = meas.iou(est);
+    //     //         if(iou > max_iou){
+    //     //             matched_obj = objects_[i];
+    //     //             //matched_obj = objects_[i].get();
+    //     //             max_iou = iou;
+    //     //         }
+    //     //     }
+    //     //     bool matched = false;
+    //     //     if(matched_obj == nullptr){
+    //     //         matched = false;
+    //     //     }
+    //     //     else{
+    //     //         matched = max_iou > 0.2;
+    //     //         if(!matched){
+    //     //             gtsam::Point3 q_center =  Twc.transformFrom(det.Q().centroid());
+    //     //             if((q_center - matched_obj->Q().centroid()).norm() < max(det.Q().radii().norm(), matched_obj->Q().radii().norm())){
+    //     //                 matched = true;
+    //     //             }
+    //     //         }
+    //     //     }
+    //     //     Vector4 bbox_noise_vec(50.0, 50.0, 50.0, 50.0);
+    //     //     // if(max_iou > 1.0e-5){
+    //     //     //     bbox_noise_vec = bbox_noise_vec * (1.0 / max_iou);
+    //     //     // }
+    //     //     auto bbox_noise = gtsam::noiseModel::Diagonal::Sigmas(bbox_noise_vec);
+    //     //     if(matched){
+    //     //         if(meas.xmin() < boundary_thresh || meas.xmax() > img_width - boundary_thresh || meas.ymin() < boundary_thresh || meas.ymax() > img_height - boundary_thresh){
+    //     //             continue;
+    //     //         }
+    //     //         cout<<"MATCHED"<<endl;
+    //     //         gtsam_quadrics::BoundingBoxFactor bbf(det.getROI(), K_gtsam, sensor_id, O(matched_obj->id()), bbox_noise, gtsam_quadrics::BoundingBoxFactor::STANDARD);
+    //     //         gtSAMgraph.add(bbf);
+    //     //         matches.insert({&det, matched_obj});
+    //     //     }
+    //     //     else{ // registerObject
+    //     //         gtsam_quadrics::ConstrainedDualQuadric dQc = det.Q();
+    //     //         gtsam::Pose3 dQc_pose = dQc.pose();
+
+    //     //         if(dQc_pose.z() < 0){
+    //     //             continue;
+    //     //         }
+    //     //         if(det.Q().radii().norm() < 1.0e-3){
+    //     //             continue;
+    //     //         }
+    //     //         gtsam::Pose3 dQw_pose = Twc.transformPoseFrom(dQc_pose);
+    //     //         gtsam_quadrics::ConstrainedDualQuadric Q(dQw_pose, dQc.radii());
+    //     //         gtsam_quadrics::AlignedBox2 est_box = quadric_cam.project(Q, Twc, K_gtsam).bounds();
+    //     //         if(est_box.iou(det.getROI()) < 0.15){
+    //     //             cout<<"CC"<<endl;
+    //     //             continue;
+    //     //         }
+    //     //         //std::shared_ptr<LIO_SAM_SEMANTIC::Object> new_obj(new LIO_SAM_SEMANTIC::Object(det.getClassName(), objects_.size(), Q));
+    //     //         LIO_SAM_SEMANTIC::Object* new_obj = new LIO_SAM_SEMANTIC::Object(det.getClassName(), objects_.size(), Q);
+    //     //         Eigen::VectorXd opf_noise_vec = Eigen::VectorXd::Ones(9);
+    //     //         auto init_obj_noise = gtsam::noiseModel::Diagonal::Sigmas(opf_noise_vec);
+    //     //         gtsam::PriorFactor<gtsam_quadrics::ConstrainedDualQuadric> opf(O(new_obj->id()), Q, init_obj_noise);
+    //     //         initialEstimate.insert(O(new_obj->id()), Q);
+    //     //         gtSAMgraph.add(opf);
+    //     //         gtsam_quadrics::BoundingBoxFactor bbf(det.getROI(), K_gtsam, sensor_id, O(new_obj->id()), bbox_noise, gtsam_quadrics::BoundingBoxFactor::TRUNCATED);
+    //     //         gtSAMgraph.add(bbf);
+    //     //         objects_.push_back(new_obj);
+    //     //     } 
+    //     // }
+
+    //     //=========Debug==================
+    //     if(!matches.empty()){
+    //         cv::Mat dg_view = dg.view.clone();
+    //         int cnt = 0;
+    //         gtsam_quadrics::QuadricCamera qcam;
+    //         gtsam::Cal3_S2::shared_ptr K_gtsam(new gtsam::Cal3_S2(K_(0, 0), K_(1, 1), 0.0, K_(0, 2), K_(1, 2))); 
+    //         for(auto& corr : matches){
+    //             cv::rectangle(dg_view, dg.detections[corr.first].getROI_CV(), cv::Scalar(0, 0, 255));
+    //             cv::putText(dg_view, to_string(cnt), dg.detections[corr.first].getROI_CV().tl(), 1, 1, cv::Scalar(0, 0, 255));
+                
+    //             gtsam_quadrics::ConstrainedDualQuadric Q = corr.second.first->Q();
+    //             gtsam_quadrics::AlignedBox2 bbox_est = qcam.project(Q, Twc, K_gtsam).bounds(); 
+    //             cv::Rect bbox_cv(bbox_est.xmin(), bbox_est.ymin(), bbox_est.width(), bbox_est.height());
+    //             cv::rectangle(dg_view, bbox_cv, cv::Scalar(255, 0, 0));
+    //             cv::putText(dg_view, to_string(cnt), bbox_cv.tl(), 1, 1, cv::Scalar(255, 0, 0));
+    //             cnt++;
+    //         }
+    //         // for(const auto& det : dg.detections){
+    //         //     cv::rectangle(dg_view, det.getROI_CV(), cv::Scalar(0, 0, 255));
+    //         //     cv::putText(dg_view, det.getClassName(), det.getROI_CV().tl(), 1, 1, cv::Scalar(255, 255, 255));
+    //         // }
+
+    //         // gtsam_quadrics::QuadricCamera qcam;
+    //         // gtsam::Cal3_S2::shared_ptr K_gtsam(new gtsam::Cal3_S2(K_(0, 0), K_(1, 1), 0.0, K_(0, 2), K_(1, 2))); 
+    //         // for(int i = 0; i < objects_.size(); ++i){
+    //         //     gtsam_quadrics::ConstrainedDualQuadric Q = objects_[i]->Q();
+    //         //     if(Q.isBehind(Twc) || Q.contains(Twc)){
+    //         //         continue;
+    //         //     }
+    //         //     gtsam_quadrics::AlignedBox2 bbox_est = qcam.project(Q, Twc, K_gtsam).bounds(); 
+    //         //     cv::Rect bbox_cv(bbox_est.xmin(), bbox_est.ymin(), bbox_est.width(), bbox_est.height());
+    //         //     cv::rectangle(dg_view, bbox_cv, cv::Scalar(255, 0, 0));
+    //         // }
+    //         if(!dg_view.empty()){
+    //             cv::imwrite("/home/nuninu98/test.png", dg_view);
+    //             cv::waitKey(1);
+    //         }
+    //     }
+    //     //================================
+    // }
 
     void optimizeGraph(){
         isam->update(gtSAMgraph, initialEstimate);
@@ -1915,7 +2064,9 @@ public:
         // odom factor
         addOdomFactor();
 
-        addSemanticFactor();
+
+        addSemanticDetections();
+        //addSemanticFactor();
 
         // gps factor
         addGPSFactor();
@@ -1954,12 +2105,12 @@ public:
         thisPose6D.time = timeLaserInfoCur;
         cloudKeyPoses6D->push_back(thisPose6D);
 
-        for(int i = 0; i < objects_.size(); ++i){
-            object_lock_.lock();
-            gtsam_quadrics::ConstrainedDualQuadric Q_aft = isamCurrentEstimate.at<gtsam_quadrics::ConstrainedDualQuadric>(O(i));
-            objects_[i]->setQ(Q_aft);
-            object_lock_.unlock();
-        }
+        // for(int i = 0; i < objects_.size(); ++i){
+        //     object_lock_.lock();
+        //     gtsam_quadrics::ConstrainedDualQuadric Q_aft = isamCurrentEstimate.at<gtsam_quadrics::ConstrainedDualQuadric>(O(i));
+        //     objects_[i]->setQ(Q_aft);
+        //     object_lock_.unlock();
+        // }
         // cout << "****************************************************" << endl;
         // cout << "Pose covariance:" << endl;
         // cout << isam->marginalCovariance(isamCurrentEstimate.size()-1) << endl << endl;
@@ -2154,7 +2305,6 @@ public:
             obj_marker.color.b = 255.0;
             obj_markers.markers.push_back(obj_name);
         }
-        cout<<"===="<<endl;
         pubObjects.publish(obj_markers);
     }
 

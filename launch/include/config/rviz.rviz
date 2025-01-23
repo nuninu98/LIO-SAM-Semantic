@@ -540,6 +540,14 @@ Visualization Manager:
       Use Fixed Frame: true
       Use rainbow: true
       Value: true
+    - Class: rviz/MarkerArray
+      Enabled: true
+      Marker Topic: /quadrics
+      Name: MarkerArray
+      Namespaces:
+        "": true
+      Queue Size: 100
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 255; 255; 255
@@ -572,9 +580,9 @@ Visualization Manager:
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.09479701519012451
+      Pitch: 0.6297973394393921
       Target Frame: base_link
-      Yaw: 4.986684322357178
+      Yaw: 3.961677074432373
     Saved: ~
 Window Geometry:
   Displays:
