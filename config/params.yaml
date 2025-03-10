@@ -20,7 +20,7 @@ lio_sam:
   
   # Export settings
   savePCD: false                              # https://github.com/TixiaoShan/LIO-SAM/issues/3
-  savePCDDirectory: "/catkin_ws/src/LIO-SAM-Semantic/maps/"        # in your home folder, starts and ends with "/". Warning: the code deletes "LOAM" folder then recreates it. See "mapOptimization" for implementation
+  savePCDDirectory: "/catkin_ws/src/LIO-SAM-Semantic/maps/new/"        # in your home folder, starts and ends with "/". Warning: the code deletes "LOAM" folder then recreates it. See "mapOptimization" for implementation
 
   # Sensor Settings
   sensor: velodyne                            # lidar sensor type, 'velodyne' or 'ouster' or 'livox'
@@ -92,7 +92,7 @@ lio_sam:
   globalMapVisualizationPoseDensity: 10.0       # meters, global map visualization keyframe density
   globalMapVisualizationLeafSize: 1.0           # meters, global map visualization cloud density
   #camera parameter
-  K: [528.433756558705, 0.0, 320.5, 0.0, 528.433756558705, 240.5, 0.0, 0.0, 1.0]
+  K: [1056.86751311741, 0.0, 640.5, 0.0, 1056.86751311741, 360.5, 0.0, 0.0, 1.0]
   rgb_topic: /image_raw
   depth_topic: /depth/image_raw
   camera_trans: [0.0, 0.0, 0.1] # Tlc
